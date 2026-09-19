@@ -1,0 +1,30 @@
+name: offline-checks
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.9", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Install package
+        run: python -m pip install .
+      - name: Check local configuration
+        run: research-radar doctor
+      - name: Run unit and integration tests
+        run: python -m unittest discover -s tests -v
+      - name: Run synthetic offline demo
+        run: research-radar demo --data-dir "${{ runner.temp }}/research-radar-demo"
+      - name: Verify installed package outside the checkout
+        working-directory: ${{ runner.temp }}
+        run: |
+          research-radar doctor
+          python -m research_radar demo --data-dir wheel-demo

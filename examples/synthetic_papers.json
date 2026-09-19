@@ -1,0 +1,46 @@
+{
+  "schema_version": 1,
+  "run": {
+    "id": "synthetic-fixture-v1",
+    "status": "complete",
+    "window": {"start": "2026-01-01", "end": "2026-01-01"},
+    "sources": ["synthetic"],
+    "disclaimer": "SYNTHETIC OFFLINE DEMO. Every paper, researcher, institution, company, claim, and URL is fictional. This is not a live research result."
+  },
+  "papers": [
+    {
+      "id": "synthetic:world-model-demo",
+      "title": "SYNTHETIC DEMO: Action-conditioned World Model",
+      "abstract": "This entirely fictional example describes a world model for robot planning. A synthetic simulator predicts the result of an action sequence and compares imagined alternatives. The fictional experiment reports a 12% improvement over its fictional baseline. All names, results, and references in this record were created solely to exercise the offline software pipeline; no scientific claims are being made.",
+      "authors": [{"name": "Synthetic Researcher A", "affiliations": ["Synthetic Lab A"]}],
+      "url": "https://example.invalid/synthetic/world-model-demo",
+      "pdf_url": "https://example.invalid/synthetic/world-model-demo.pdf",
+      "published": "2026-01-01",
+      "updated": "2026-01-01",
+      "sources": ["synthetic"],
+      "hf_upvotes": 0,
+      "clusters": ["World-Models"],
+      "primary_cluster": "World-Models",
+      "prior": 0.0,
+      "prior_signals": [],
+      "change": "new"
+    },
+    {
+      "id": "synthetic:robot-demo",
+      "title": "SYNTHETIC DEMO: Vision-Language-Action Robot Policy",
+      "abstract": "This fictional vision-language-action paper is a second offline test case. A synthetic robot policy translates a synthetic visual scene and a text request into manipulation actions. The fictional study reports a 10% improvement in a synthetic evaluation. Neither its researcher nor its lab or results exists in the real world. This record demonstrates data flow and review formatting only.",
+      "authors": [{"name": "Synthetic Researcher B", "affiliations": ["Synthetic Lab B"]}],
+      "url": "https://example.invalid/synthetic/robot-demo",
+      "pdf_url": "https://example.invalid/synthetic/robot-demo.pdf",
+      "published": "2026-01-01",
+      "updated": "2026-01-01",
+      "sources": ["synthetic"],
+      "hf_upvotes": 0,
+      "clusters": ["VLA"],
+      "primary_cluster": "VLA",
+      "prior": 0.0,
+      "prior_signals": [],
+      "change": "new"
+    }
+  ]
+}

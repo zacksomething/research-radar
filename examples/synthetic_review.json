@@ -1,0 +1,297 @@
+{
+  "schema_version": 1,
+  "review_schema": "research-radar-scout/v1",
+  "paper_bundle": {
+    "schema_version": 1,
+    "run": {
+      "id": "synthetic-fixture-v1",
+      "status": "complete",
+      "window": {
+        "start": "2026-01-01",
+        "end": "2026-01-01"
+      },
+      "sources": [
+        "synthetic"
+      ],
+      "disclaimer": "SYNTHETIC OFFLINE DEMO: all papers, people, institutions, evidence and scores are fictional test data. No websites, LLM APIs or financing databases were queried.",
+      "synthetic_demo": true
+    },
+    "papers": [
+      {
+        "id": "synthetic:world-model-demo",
+        "title": "SYNTHETIC DEMO: Action-conditioned World Model",
+        "abstract": "This entirely fictional example describes a world model for robot planning. A synthetic simulator predicts the result of an action sequence and compares imagined alternatives. The fictional experiment reports a 12% improvement over its fictional baseline. All names, results, and references in this record were created solely to exercise the offline software pipeline; no scientific claims are being made.",
+        "authors": [
+          {
+            "name": "Synthetic Researcher A",
+            "affiliations": [
+              "Synthetic Lab A"
+            ]
+          }
+        ],
+        "url": "https://example.invalid/synthetic/world-model-demo",
+        "pdf_url": "https://example.invalid/synthetic/world-model-demo.pdf",
+        "published": "2026-01-01",
+        "updated": "2026-01-01",
+        "sources": [
+          "synthetic"
+        ],
+        "hf_upvotes": 0,
+        "clusters": [
+          "World-Models"
+        ],
+        "primary_cluster": "World-Models",
+        "prior": 0.0,
+        "prior_signals": [],
+        "change": "new"
+      },
+      {
+        "id": "synthetic:robot-demo",
+        "title": "SYNTHETIC DEMO: Vision-Language-Action Robot Policy",
+        "abstract": "This fictional vision-language-action paper is a second offline test case. A synthetic robot policy translates a synthetic visual scene and a text request into manipulation actions. The fictional study reports a 10% improvement in a synthetic evaluation. Neither its researcher nor its lab or results exists in the real world. This record demonstrates data flow and review formatting only.",
+        "authors": [
+          {
+            "name": "Synthetic Researcher B",
+            "affiliations": [
+              "Synthetic Lab B"
+            ]
+          }
+        ],
+        "url": "https://example.invalid/synthetic/robot-demo",
+        "pdf_url": "https://example.invalid/synthetic/robot-demo.pdf",
+        "published": "2026-01-01",
+        "updated": "2026-01-01",
+        "sources": [
+          "synthetic"
+        ],
+        "hf_upvotes": 0,
+        "clusters": [
+          "VLA"
+        ],
+        "primary_cluster": "VLA",
+        "prior": 0.0,
+        "prior_signals": [],
+        "change": "new"
+      }
+    ]
+  },
+  "selection": {
+    "limit": null,
+    "total": 2,
+    "selected": 2,
+    "omitted_paper_ids": [],
+    "method": "source_order; no prior threshold or ranking"
+  },
+  "evidence": [
+    {
+      "id": "synthetic-full-text-a",
+      "url": "https://example.invalid/synthetic/world-model-demo.pdf",
+      "checked_at": "2026-01-01T00:00:00Z",
+      "source_date": "2026-01-01",
+      "kind": "paper_full_text",
+      "entity_ids": [
+        "synthetic:world-model-demo"
+      ],
+      "note": "SYNTHETIC fixture standing in for a full-text review. No real paper exists and no URL was fetched."
+    },
+    {
+      "id": "synthetic-person-evidence-a",
+      "url": "https://example.invalid/synthetic/researcher-a",
+      "checked_at": "2026-01-01T00:00:00Z",
+      "source_date": "2026-01-01",
+      "kind": "author_homepage",
+      "entity_ids": [
+        "synthetic-person-a"
+      ],
+      "note": "SYNTHETIC fixture for a fictional researcher and professional contact. No real identity or contact is asserted."
+    },
+    {
+      "id": "synthetic-full-text-b",
+      "url": "https://example.invalid/synthetic/robot-demo.pdf",
+      "checked_at": "2026-01-01T00:00:00Z",
+      "source_date": "2026-01-01",
+      "kind": "paper_full_text",
+      "entity_ids": [
+        "synthetic:robot-demo"
+      ],
+      "note": "SYNTHETIC fixture standing in for a full-text review. No real paper exists and no URL was fetched."
+    },
+    {
+      "id": "synthetic-person-evidence-b",
+      "url": "https://example.invalid/synthetic/researcher-b",
+      "checked_at": "2026-01-01T00:00:00Z",
+      "source_date": "2026-01-01",
+      "kind": "author_homepage",
+      "entity_ids": [
+        "synthetic-person-b"
+      ],
+      "note": "SYNTHETIC fixture for a fictional researcher and professional contact. No real identity or contact is asserted."
+    }
+  ],
+  "candidates": [
+    {
+      "id": "candidate-3bf68a08afeb34c8",
+      "paper_id": "synthetic:world-model-demo",
+      "review_status": "complete",
+      "triage": {
+        "status": "reviewed",
+        "relevant": true,
+        "abstract_score": 3,
+        "reason": "Synthetic topic match supplied to test the offline review workflow."
+      },
+      "person": {
+        "id": "synthetic-person-a",
+        "name": "Synthetic Researcher A",
+        "status": "verified",
+        "role": "Fictional demo researcher",
+        "affiliation": "Synthetic Lab A",
+        "evidence_ids": [
+          "synthetic-person-evidence-a"
+        ]
+      },
+      "company": {
+        "id": null,
+        "name": null,
+        "status": "unknown",
+        "evidence_ids": []
+      },
+      "relationship": {
+        "status": "unknown",
+        "type": null,
+        "person_id": null,
+        "company_id": null,
+        "evidence_ids": []
+      },
+      "financing": {
+        "status": "unknown",
+        "stage": "unknown",
+        "confidence": "low",
+        "company_id": null,
+        "evidence_ids": []
+      },
+      "assessment": {
+        "technical": {
+          "score": 4,
+          "reason": "Synthetic demonstration value; this is not a judgment about real research or people.",
+          "evidence_ids": [
+            "synthetic-full-text-a"
+          ],
+          "scope": "full_text"
+        },
+        "team": {
+          "score": 3,
+          "reason": "Synthetic demonstration value; this is not a judgment about real research or people.",
+          "evidence_ids": [
+            "synthetic-person-evidence-a"
+          ]
+        },
+        "thesis_fit": {
+          "score": 4,
+          "reason": "Synthetic demonstration value; this is not a judgment about real research or people.",
+          "evidence_ids": [
+            "synthetic-full-text-a"
+          ]
+        },
+        "reachability": {
+          "score": 3,
+          "reason": "Synthetic demonstration value; this is not a judgment about real research or people.",
+          "evidence_ids": [
+            "synthetic-person-evidence-a"
+          ]
+        }
+      },
+      "visibility": {
+        "status": "unknown",
+        "value": "unknown",
+        "evidence_ids": []
+      },
+      "notes": [
+        "SYNTHETIC OFFLINE DEMO: all papers, people, institutions, evidence and scores are fictional test data. No websites, LLM APIs or financing databases were queried.",
+        "Unknown financing is not treated as unfunded or early-stage."
+      ]
+    },
+    {
+      "id": "candidate-22ac33b3ff38dd5d",
+      "paper_id": "synthetic:robot-demo",
+      "review_status": "complete",
+      "triage": {
+        "status": "reviewed",
+        "relevant": true,
+        "abstract_score": 3,
+        "reason": "Synthetic topic match supplied to test the offline review workflow."
+      },
+      "person": {
+        "id": "synthetic-person-b",
+        "name": "Synthetic Researcher B",
+        "status": "verified",
+        "role": "Fictional demo researcher",
+        "affiliation": "Synthetic Lab B",
+        "evidence_ids": [
+          "synthetic-person-evidence-b"
+        ]
+      },
+      "company": {
+        "id": null,
+        "name": null,
+        "status": "unknown",
+        "evidence_ids": []
+      },
+      "relationship": {
+        "status": "unknown",
+        "type": null,
+        "person_id": null,
+        "company_id": null,
+        "evidence_ids": []
+      },
+      "financing": {
+        "status": "unknown",
+        "stage": "unknown",
+        "confidence": "low",
+        "company_id": null,
+        "evidence_ids": []
+      },
+      "assessment": {
+        "technical": {
+          "score": 3,
+          "reason": "Synthetic demonstration value; this is not a judgment about real research or people.",
+          "evidence_ids": [
+            "synthetic-full-text-b"
+          ],
+          "scope": "full_text"
+        },
+        "team": {
+          "score": 3,
+          "reason": "Synthetic demonstration value; this is not a judgment about real research or people.",
+          "evidence_ids": [
+            "synthetic-person-evidence-b"
+          ]
+        },
+        "thesis_fit": {
+          "score": 3,
+          "reason": "Synthetic demonstration value; this is not a judgment about real research or people.",
+          "evidence_ids": [
+            "synthetic-full-text-b"
+          ]
+        },
+        "reachability": {
+          "score": 3,
+          "reason": "Synthetic demonstration value; this is not a judgment about real research or people.",
+          "evidence_ids": [
+            "synthetic-person-evidence-b"
+          ]
+        }
+      },
+      "visibility": {
+        "status": "unknown",
+        "value": "unknown",
+        "evidence_ids": []
+      },
+      "notes": [
+        "SYNTHETIC OFFLINE DEMO: all papers, people, institutions, evidence and scores are fictional test data. No websites, LLM APIs or financing databases were queried.",
+        "Unknown financing is not treated as unfunded or early-stage."
+      ]
+    }
+  ],
+  "synthetic_demo": true,
+  "disclaimer": "SYNTHETIC OFFLINE DEMO: all papers, people, institutions, evidence and scores are fictional test data. No websites, LLM APIs or financing databases were queried."
+}

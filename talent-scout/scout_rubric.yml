@@ -1,0 +1,40 @@
+# Deterministic research-priority score, not an investment recommendation.
+schema_version: 1
+version: "1.0"
+weights:
+  technical: 0.45
+  team: 0.25
+  thesis_fit: 0.20
+  reachability: 0.10
+# Every assessment is 0..5. Null means missing and prevents a completed score.
+# 0 = evidence contradicts fit; 1 = weak; 2 = limited; 3 = adequate;
+# 4 = strong; 5 = exceptionally strong. A reason and scoped evidence are required.
+# Technical assessment requires full-text review; abstract triage is not scored here.
+stage_multipliers:
+  unknown: 0.75
+  bootstrapped_confirmed: 1.0
+  pre_seed: 1.0
+  seed: 1.0
+  angel: 1.0
+  pre_a: 1.0
+  pre_a_plus: 1.0
+  a: 1.0
+  a_plus: 1.0
+  b: 0.6
+  c_plus: 0.0
+  public: 0.0
+  acquired: 0.0
+hard_drop_stages: [c_plus, public, acquired]
+# Applied only with a verified company relationship AND medium/high-confidence
+# sourced financing stage. Unknown stage always gets zero visibility bonus.
+visibility_bonus:
+  unknown: 0.0
+  low: 0.20
+  medium: 0.10
+  high: 0.0
+# score = round(min(10, 10 * weighted_mean(scores / 5)
+#                   * effective_stage_multiplier * (1 + visibility_bonus)), 2)
+# Unknown/unattributable/low-confidence financing uses unknown, never early-stage.
+# Visibility must be positively researched with scope/reason, not inferred from
+# a failed source or absence of funding news. Reachability uses professional
+# location/contact evidence, never ethnicity or inferred nationality.

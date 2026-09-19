@@ -1,0 +1,146 @@
+# Cluster keyword definitions for /paper-sweep
+# Multi-label routing: include/exclude affects report tags only; machine output keeps every paper.
+# Edit freely as your research focus evolves.
+
+clusters:
+  World-Models:
+    include:
+      - "world model"
+      - "world models"
+      - "video world model"
+      - "dynamics model"
+      - "latent dynamics"
+      - "neural simulator"
+      - "physics-based generation"
+      - "predictive world"
+      - "videoworld"
+      - "genie"
+      - "dreamer"
+      - "JEPA"
+      - "I-JEPA"
+      - "V-JEPA"
+      - "world simulator"
+      - "interactive environment"
+      - "playable world"
+      - "action-conditioned"
+    exclude:
+      - "world health"
+      - "world cup"
+
+  VLA:
+    include:
+      - "vision-language-action"
+      - "vision language action"
+      - "VLA"
+      - "robot manipulation"
+      - "robotic manipulation"
+      - "robot policy"
+      - "RT-2"
+      - "RT-X"
+      - "OpenVLA"
+      - "pi-0"
+      - "π0"
+      - "pi0"
+      - "manipulation policy"
+      - "action chunking"
+      - "ACT"
+    exclude: []
+
+  Embodied-AI:
+    include:
+      - "embodied"
+      - "embodied agent"
+      - "embodied AI"
+      - "humanoid"
+      - "biped"
+      - "quadruped"
+      - "dexterous"
+      - "whole-body control"
+      - "sim-to-real"
+      - "sim2real"
+      - "Isaac"
+      - "MuJoCo"
+      - "tactile"
+      - "imitation learning"
+      - "behavior cloning"
+      - "diffusion policy"
+    exclude: []
+
+  Agentic-AI:
+    include:
+      - "LLM agent"
+      - "autonomous agent"
+      - "multi-agent"
+      - "tool use"
+      - "tool-use"
+      - "agentic"
+      - "ReAct"
+      - "planning agent"
+      - "computer use"
+      - "GUI agent"
+      - "web agent"
+      - "browser agent"
+      - "deep research"
+      - "MCP"
+      - "Model Context Protocol"
+      - "mobile agent"
+      - "phone agent"
+      - "OS agent"
+      - "device control"
+      - "agent memory"
+      - "long-horizon agent"
+      - "agentic workflow"
+    exclude:
+      - "agent-based modeling epidemiology"
+
+  Foundation-Models:
+    include:
+      - "foundation model"
+      - "large language model"
+      - "multimodal"
+      - "mixture of experts"
+      - "MoE"
+      - "scaling laws"
+      - "pretraining"
+      - "pre-training"
+      - "RLHF"
+      - "DPO"
+      - "GRPO"
+      - "reasoning model"
+      - "chain-of-thought"
+      - "test-time compute"
+      - "long context"
+      - "context window"
+    exclude:
+      - "language model of"  # avoid trivial usage
+
+# Unverified text priors for ordering only; never a quality verdict or collection filter.
+scoring:
+  code_released: 3.0           # availability claim/link, not a verified working release
+  benchmark_named: 1.5         # mentions a specific named benchmark
+  baseline_named: 1.5          # named baseline mentioned; comparison is not verified
+  ablation_present: 1.0        # mentions ablation study
+
+  # Penalties
+  buzzword_density: -2.0       # >5 buzzwords per 100 words (revolutionary, novel, first-of-its-kind, paradigm)
+  no_numbers: -1.5             # no integer/decimal/percentage in abstract; not proof of missing results
+  vague_sota_claim: -2.0       # "achieves SOTA" without a number
+  hype_penalty: -1.0           # once per distinct matching term
+  hf_noticed: 1.5              # 10–49 votes
+  hf_popular: 3.0              # 50+ votes
+  hype_words:
+    - "revolutionary"
+    - "paradigm shift"
+    - "groundbreaking"
+    - "unprecedented"
+    - "first-of-its-kind"
+
+# Sources
+sources:
+  arxiv:
+    # cs.MA = multi-agent, cs.HC = GUI/human-computer, cs.NE = neuro-evolutionary.
+    # Added so agent/GUI/embodied work cross-listed outside the core 5 isn't missed.
+    categories: ["cs.AI", "cs.LG", "cs.RO", "cs.CV", "cs.CL", "cs.MA", "cs.HC", "cs.NE"]
+    base_url: "https://export.arxiv.org/api/query"
+  huggingface_daily:
+    url: "https://huggingface.co/api/daily_papers"

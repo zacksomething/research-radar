@@ -44,6 +44,60 @@ class CollectionUnitTests(unittest.TestCase):
         self.assertEqual(c.arxiv_id('https://arxiv.org/abs/cs/9901001v2'), 'cs/9901001')
         self.assertEqual(c.normalize_paper({'id': 'synthetic:example', 'title': 'Demo'})['id'], 'synthetic:example')
 
+    def test_arxiv_ids_require_whole_identifiers_or_official_paper_urls(self):
+        accepted = {
+            '2609.00001v12': '2609.00001',
+            'arxiv:2609.00001v2': '2609.00001',
+            'hep-th/9901001v2': 'hep-th/9901001',
+            'https://arxiv.org/pdf/hep-th/9901001v2.pdf': 'hep-th/9901001',
+            'http://export.arxiv.org/abs/cs/9901001v2': 'cs/9901001',
+        }
+        for value, expected in accepted.items():
+            with self.subTest(value=value):
+                self.assertEqual(c.arxiv_id(value), expected)
+        for value in ('external:2609.00001', 'notes 2609.00001', '2609.00001-supplement',
+                      'https://example.org/reports/2609.00001',
+                      'https://arxiv.org.evil.example/abs/2609.00001',
+                      'https://arxiv.org/search?query=2609.00001',
+                      'https://arxiv.org/abs/2609.00001/supplement'):
+            with self.subTest(value=value):
+                self.assertEqual(c.arxiv_id(value), '')
+
+    def test_explicit_external_identity_cannot_be_merged_with_arxiv_number(self):
+        for url in ('https://example.org/reports/2609.00001', 'https://arxiv.org/abs/2609.00001'):
+            with self.subTest(url=url):
+                external = paper(id='external:2609.00001', url=url, title='Different publication')
+                self.assertEqual(external['id'], 'external:2609.00001')
+                self.assertIsNone(external['arxiv_version'])
+                self.assertEqual(len(c.prepare_papers([external, paper()], {}, CFG)), 2)
+        anonymous = c.normalize_paper({'title': 'External report', 'url': 'https://example.org/2609.00001'})
+        self.assertTrue(anonymous['id'].startswith('external:'))
+
+    def test_id_only_new_version_replaces_legacy_state_without_version_field(self):
+        old = paper()
+        del old['arxiv_version']
+        # Migrating a legacy v1 state must not create an artificial update.
+        unchanged = c.prepare_papers([paper()], {old['id']: old}, CFG)[0]
+        self.assertEqual(unchanged['change'], 'seen')
+        newer = paper(id='arxiv:2609.00001v2', url='https://arxiv.org/abs/2609.00001',
+                      abstract='Revised 5', updated='2026-09-19T00:00:00Z')
+        self.assertEqual(newer['arxiv_version'], 2)
+        actual = c.prepare_papers([newer], {old['id']: old}, CFG)[0]
+        self.assertEqual(actual['abstract'], 'Revised 5')
+        self.assertEqual(actual['arxiv_version'], 2)
+        self.assertEqual(actual['change'], 'updated')
+        # A later stale observation cannot roll the stored v2 back to v1.
+        again = c.prepare_papers([old], {actual['id']: actual}, CFG)[0]
+        self.assertEqual(again['arxiv_version'], 2)
+        self.assertEqual(again['abstract'], 'Revised 5')
+
+    def test_conflicting_arxiv_identity_or_versions_are_rejected(self):
+        for change in ({'id': 'arxiv:2609.00002'}, {'id': 'arxiv:2609.00001v2'},
+                       {'arxiv_version': 2}, {'arxiv_version': True}):
+            with self.subTest(change=change):
+                with self.assertRaises(ValueError):
+                    paper(**change)
+
     def test_multilabel_and_unmatched_records_are_preserved(self):
         records = c.prepare_papers([paper(), paper(id='synthetic:unknown', url='https://example.invalid/unknown', title='Unrelated', abstract='Study 20')], {}, CFG)
         self.assertEqual(len(records), 2)
@@ -80,6 +134,37 @@ class CollectionUnitTests(unittest.TestCase):
         self.assertEqual(records[0]['authors'][0]['affiliations'], ['Lab'])
         self.assertEqual(records[0]['sources'], ['arxiv', 'hf'])
 
+    def test_same_version_partial_author_list_cannot_delete_known_authors(self):
+        full = paper(authors=[{'name': 'A', 'affiliations': ['Old Lab']}, 'B', 'C'])
+        partial = paper(authors=[{'name': 'A', 'affiliations': ['Additional Lab']}])
+        for observations in ([full, partial], [partial, full]):
+            merged = c.prepare_papers(observations, {}, CFG)[0]
+            self.assertEqual([a['name'] for a in merged['authors']], ['A', 'B', 'C'])
+            self.assertEqual(merged['authors'][0]['affiliations'], ['Additional Lab', 'Old Lab'])
+        stored = c.prepare_papers([partial], {full['id']: full}, CFG)[0]
+        self.assertEqual([a['name'] for a in stored['authors']], ['A', 'B', 'C'])
+
+    def test_newer_version_can_remove_an_author(self):
+        full = paper(authors=['A', 'B', 'C'])
+        revised = paper(url='https://arxiv.org/abs/2609.00001v2', authors=['A'],
+                        updated='2026-09-19T00:00:00Z')
+        for observations in ([full, revised], [revised, full]):
+            merged = c.prepare_papers(observations, {}, CFG)[0]
+            self.assertEqual(merged['arxiv_version'], 2)
+            self.assertEqual([a['name'] for a in merged['authors']], ['A'])
+        stored = c.prepare_papers([revised], {full['id']: full}, CFG)[0]
+        self.assertEqual([a['name'] for a in stored['authors']], ['A'])
+
+    def test_dated_external_revision_can_correct_an_author_list(self):
+        full = paper(id='external:report', url='https://example.org/report',
+                     authors=['A', 'B'], updated='2026-10-01')
+        corrected = paper(id='external:report', url='https://example.org/report',
+                          authors=['A'], updated='2026-10-08')
+        stored = c.prepare_papers([corrected], {full['id']: full}, CFG)[0]
+        self.assertIsNone(stored['arxiv_version'])
+        self.assertEqual([a['name'] for a in stored['authors']], ['A'])
+        self.assertEqual(stored['change'], 'updated')
+
     def test_hf_featured_old_paper_is_not_dropped(self):
         payload = [{'paper': {'id': '2608.00001', 'title': 'An older paper', 'summary': 'Full abstract', 'authors': [{'name': 'A'}], 'publishedAt': '2026-08-01T00:00:00Z', 'upvotes': 75}}]
         client = Mock()
@@ -89,6 +174,22 @@ class CollectionUnitTests(unittest.TestCase):
         self.assertEqual(records[0]['published'], '2026-08-01T00:00:00Z')
         self.assertEqual(records[0]['hf_featured_dates'], ['2026-09-18'])
         self.assertIn('example.invalid/hf', client.get.call_args[0][0])
+
+    def test_bad_hf_record_does_not_discard_remaining_valid_records(self):
+        def valid(identifier):
+            return {'paper': {'id': identifier, 'title': 'Valid paper', 'authors': [{'name': 'A'}]}}
+        for invalid in (None, {'paper': []}, {'paper': {'id': '2609.00003'}},
+                        {'paper': {'id': '', 'title': 'No identifier'}}):
+            with self.subTest(invalid=invalid):
+                payload = [valid('2609.00001'), invalid, valid('2609.00002')]
+                client = Mock()
+                client.get.return_value = (json.dumps(payload).encode(), 1)
+                records, result = c.fetch_hf(CFG, dt.date(2026, 9, 18), dt.date(2026, 9, 18), client, 10)
+                self.assertEqual([p['id'] for p in records], ['arxiv:2609.00001', 'arxiv:2609.00002'])
+                self.assertEqual(result['status'], 'partial')
+                self.assertEqual(result['count'], 2)
+                self.assertEqual(len(result['errors']), 1)
+                self.assertIn('2026-09-18: record 2:', result['errors'][0])
 
     def test_arxiv_cap_is_explicit_and_uses_config_url(self):
         client = Mock()

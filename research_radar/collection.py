@@ -22,7 +22,8 @@ DEFAULT_CONFIG = Path(__file__).parent / 'resources' / 'clusters.yml'
 ATOM = '{http://www.w3.org/2005/Atom}'
 ARXIV = '{http://arxiv.org/schemas/atom}'
 OPENSEARCH = '{http://a9.com/-/spec/opensearch/1.1/}'
-ARXIV_PATTERN = re.compile(r'(?<![\w.])((?:\d{4}\.\d{4,5}|[a-z][a-z.-]*/\d{7}))(?:v(\d+))?(?![\d.])', re.I)
+ARXIV_PATTERN = re.compile(r'((?:\d{4}\.\d{4,5}|[a-z][a-z.-]*/\d{7}))(?:v([1-9]\d*))?', re.I)
+ARXIV_HOSTS = {'arxiv.org', 'www.arxiv.org', 'export.arxiv.org'}
 
 
 def utc_yesterday():
@@ -91,9 +92,31 @@ def load_config(path):
     return cfg
 
 
+def _arxiv_parts(value):
+    """Parse a whole identifier or official abs/pdf URL, never a substring."""
+    value = str(value or '').strip()
+    if value.lower().startswith('arxiv:'):
+        value = value[6:]
+    elif '://' in value:
+        try:
+            url = urllib.parse.urlsplit(value)
+        except ValueError:
+            return '', None
+        if (url.scheme not in ('http', 'https') or url.hostname not in ARXIV_HOSTS
+                or url.username is not None or url.password is not None):
+            return '', None
+        path = re.fullmatch(r'/(abs|pdf)/(.+)', url.path)
+        if not path:
+            return '', None
+        value = path.group(2)
+        if path.group(1) == 'pdf' and value.endswith('.pdf'):
+            value = value[:-4]
+    match = ARXIV_PATTERN.fullmatch(value)
+    return (match.group(1).lower(), int(match.group(2)) if match.group(2) else None) if match else ('', None)
+
+
 def arxiv_id(value):
-    match = ARXIV_PATTERN.search(str(value or ''))
-    return match.group(1).lower() if match else ''
+    return _arxiv_parts(value)[0]
 
 
 def _strings(values):
@@ -112,9 +135,21 @@ def normalize_paper(raw, source=None):
     title = str(raw.get('title') or '').strip()
     if not title:
         raise ValueError('Paper title is required.')
-    url = str(raw.get('url') or raw.get('link') or '')
-    raw_id = str(raw.get('id') or '')
-    aid = arxiv_id(raw_id) or arxiv_id(url)
+    url = str(raw.get('url') or raw.get('link') or '').strip()
+    raw_id = str(raw.get('id') or '').strip()
+    id_aid, id_version = _arxiv_parts(raw_id)
+    url_aid, url_version = _arxiv_parts(url)
+    explicit_external = bool(raw_id and not id_aid and re.match(r'^[A-Za-z][\w+.-]*:', raw_id))
+    aid = '' if explicit_external else id_aid or url_aid
+    if aid and id_aid and url_aid and id_aid != url_aid:
+        raise ValueError('Paper ID and URL identify different arXiv papers.')
+    version = raw.get('arxiv_version')
+    if version is not None and (not isinstance(version, int) or isinstance(version, bool) or version < 1 or not aid):
+        raise ValueError('arxiv_version must be a positive integer for an arXiv paper, or null.')
+    versions = {v for v in (version, id_version, url_version) if v is not None} if aid else set()
+    if len(versions) > 1:
+        raise ValueError('Paper ID, URL and arxiv_version disagree on the arXiv version.')
+    version = next(iter(versions), None)
     paper_id = 'arxiv:' + aid if aid else raw_id
     if not paper_id:
         identity = url or re.sub(r'\s+', ' ', title).lower()
@@ -138,7 +173,7 @@ def normalize_paper(raw, source=None):
     except (ValueError, TypeError) as exc:
         raise ValueError('HF upvotes must be an integer.') from exc
     return {
-        'id': paper_id, 'title': title, 'abstract': str(raw.get('abstract') or raw.get('summary') or ''),
+        'id': paper_id, 'arxiv_version': version, 'title': title, 'abstract': str(raw.get('abstract') or raw.get('summary') or ''),
         'authors': authors, 'url': url or ('https://arxiv.org/abs/' + aid if aid else ''),
         'pdf_url': str(raw.get('pdf_url') or ('https://arxiv.org/pdf/' + aid if aid else '')),
         'published': str(raw.get('published') or raw.get('publishedAt') or ''), 'updated': str(raw.get('updated') or ''),
@@ -268,14 +303,21 @@ def fetch_hf(cfg, start, end, client, max_results):
             data = json.loads(payload)
             if not isinstance(data, list):
                 raise ValueError('HF daily response must be an array.')
-            for item in data:
-                raw = item.get('paper', {})
-                pid = raw.get('id', '')
-                paper = normalize_paper({'id': pid, 'title': raw.get('title'), 'abstract': raw.get('summary'), 'authors': raw.get('authors', []), 'published': raw.get('publishedAt', ''), 'url': 'https://arxiv.org/abs/' + pid if arxiv_id(pid) else 'https://huggingface.co/papers/' + pid, 'hf_upvotes': raw.get('upvotes', item.get('upvotes', 0)), 'hf_featured_dates': [current.isoformat()]}, 'hf')
+            for index, item in enumerate(data, 1):
                 if len(papers) >= max_results:
                     result['truncated'] = True
                     break
-                papers.append(paper)
+                try:
+                    if not isinstance(item, dict) or not isinstance(item.get('paper'), dict):
+                        raise ValueError('HF record must contain a paper object.')
+                    raw = item['paper']
+                    pid = raw.get('id', '')
+                    if not isinstance(pid, str) or not pid.strip():
+                        raise ValueError('HF paper id must be a nonempty string.')
+                    paper = normalize_paper({'id': pid, 'title': raw.get('title'), 'abstract': raw.get('summary'), 'authors': raw.get('authors', []), 'published': raw.get('publishedAt', ''), 'url': 'https://arxiv.org/abs/' + pid if arxiv_id(pid) else 'https://huggingface.co/papers/' + pid, 'hf_upvotes': raw.get('upvotes', item.get('upvotes', 0)), 'hf_featured_dates': [current.isoformat()]}, 'hf')
+                    papers.append(paper)
+                except (ValueError, TypeError, OverflowError) as exc:
+                    result['errors'].append('%s: record %d: %s' % (current.isoformat(), index, exc))
             if result['truncated'] or (len(papers) >= max_results and current < end):
                 result['truncated'] = True
                 break
@@ -397,8 +439,15 @@ def score_paper(paper, weights):
 
 
 def _version(paper):
-    match = ARXIV_PATTERN.search(paper.get('url', ''))
-    return int(match.group(2) or 0) if match else 0
+    # Older state files have no arxiv_version; recover it from their trusted ID/URL.
+    if not arxiv_id(paper.get('id')):
+        return 0
+    version = paper.get('arxiv_version')
+    if version is not None:
+        if not isinstance(version, int) or isinstance(version, bool) or version < 1:
+            raise ValueError('Invalid stored arxiv_version.')
+        return version
+    return _arxiv_parts(paper.get('id'))[1] or _arxiv_parts(paper.get('url'))[1] or 0
 
 
 def merge_papers(first, second):
@@ -407,11 +456,23 @@ def merge_papers(first, second):
     second_key = (_version(second), second.get('updated') or '', 'arxiv' in second['sources'])
     preferred, other = (second, first) if second_key >= first_key else (first, second)
     merged = dict(preferred)
+    merged['arxiv_version'] = _version(preferred) or None
     for key in ('title', 'abstract', 'authors', 'url', 'pdf_url', 'published', 'updated'):
         if not merged.get(key):
             merged[key] = other.get(key)
-    lookup = {a['name'].casefold(): a for a in other.get('authors', [])}
-    merged['authors'] = [{'name': a['name'], 'affiliations': sorted(set(a['affiliations'] + lookup.get(a['name'].casefold(), {}).get('affiliations', [])))} for a in merged['authors']]
+    # A same-version subset is an incomplete observation, not evidence of removal.
+    # Across different versions, retain the latest author's list, including removals.
+    same_revision = (_version(first) == _version(second)
+                     and (_version(first) > 0 or first.get('updated', '') == second.get('updated', '')))
+    if same_revision:
+        preferred_names = {a['name'].casefold() for a in merged['authors']}
+        other_names = {a['name'].casefold() for a in other.get('authors', [])}
+        if preferred_names < other_names:
+            merged['authors'] = other['authors']
+    affiliations = {}
+    for author in first.get('authors', []) + second.get('authors', []):
+        affiliations.setdefault(author['name'].casefold(), set()).update(author['affiliations'])
+    merged['authors'] = [{'name': a['name'], 'affiliations': sorted(affiliations[a['name'].casefold()])} for a in merged['authors']]
     merged['sources'] = sorted(set(first['sources'] + second['sources']))
     merged['hf_featured_dates'] = sorted(set(first['hf_featured_dates'] + second['hf_featured_dates']))
     merged['hf_upvotes'] = max(first['hf_upvotes'], second['hf_upvotes'])
@@ -421,6 +482,7 @@ def merge_papers(first, second):
 def fingerprint(paper):
     fields = ('id', 'title', 'abstract', 'authors', 'url', 'pdf_url', 'published', 'updated', 'sources', 'hf_upvotes', 'hf_featured_dates')
     value = {field: paper[field] for field in fields}
+    value['arxiv_version'] = _version(paper) or None
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode('utf-8')).hexdigest()
 
 

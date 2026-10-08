@@ -8,9 +8,12 @@ import datetime as dt
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import re
+import shutil
 import sys
+import tempfile
 from urllib.parse import urlparse
 
 import yaml
@@ -24,6 +27,8 @@ EVIDENCE_KINDS = {
     "author_homepage", "organization", "company", "funding_announcement",
     "database", "news", "other",
 }
+AUTHORSHIP_KINDS = {"paper_full_text", "paper_abstract", "author_homepage", "organization"}
+GENERATED_PROFILE_MARKER = "自动生成；人工笔记请写在 Researchers/ 的其他路径。"
 
 
 def _require(condition, message):
@@ -55,9 +60,19 @@ def _read_json(path):
 def _write_json(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + ".tmp")
-    temporary.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=str(path.parent),
+                                         prefix="." + path.name + ".", suffix=".tmp", delete=False) as stream:
+            temporary = Path(stream.name)
+            json.dump(value, stream, ensure_ascii=False, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None and temporary.exists():
+            temporary.unlink()
 
 
 def new_candidate(paper):
@@ -85,8 +100,15 @@ def new_candidate(paper):
     }
 
 
-def prepare(papers_path, output_path, limit=None):
+def prepare(papers_path, output_path, limit=None, overwrite=False):
     """Keep the complete source bundle; an explicit limit marks omitted papers."""
+    source, destination = Path(papers_path), Path(output_path)
+    same_file = source.resolve() == destination.resolve()
+    if source.exists() and destination.exists():
+        same_file = same_file or os.path.samefile(source, destination)
+    _require(not same_file, "Review output must differ from the input papers file, including symlinks and hard links.")
+    _require(overwrite or not (destination.exists() or destination.is_symlink()),
+             "Review output already exists; choose a new --out or use --overwrite to explicitly reset it.")
     if limit is not None:
         _require(isinstance(limit, int) and not isinstance(limit, bool) and limit > 0,
                  "limit must be a positive integer")
@@ -163,7 +185,7 @@ def _date(value, label, nullable=False):
         raise ValueError(label + " must be an ISO date or timestamp")
 
 
-def _evidence_index(review):
+def _evidence_index(review, as_of):
     items = review.get("evidence")
     _require(isinstance(items, list), "evidence must be an array")
     index = {}
@@ -177,6 +199,13 @@ def _evidence_index(review):
         _date(item.get("checked_at"), "evidence.checked_at")
         _require("source_date" in item, "evidence.source_date is required (null allowed)")
         _date(item["source_date"], "evidence.source_date", nullable=True)
+        checked_date = dt.datetime.fromisoformat(item["checked_at"].replace("Z", "+00:00")).date()
+        _require(checked_date <= as_of,
+                 "Evidence {} checked_at is after review.as_of {}; correct the date or review snapshot.".format(eid, as_of.isoformat()))
+        if item["source_date"] is not None:
+            source_date = dt.datetime.fromisoformat(item["source_date"].replace("Z", "+00:00")).date()
+            _require(source_date <= checked_date,
+                     "Evidence {} source_date is after checked_at; verify both dates before rendering.".format(eid))
         _require(item.get("kind") in EVIDENCE_KINDS, "unsupported evidence.kind: " + str(item.get("kind")))
         _require(isinstance(item.get("entity_ids"), list)
                  and all(isinstance(v, str) and v.strip() for v in item["entity_ids"]),
@@ -263,6 +292,10 @@ def assess_candidate(candidate, papers, evidence, profile, as_of=None):
             _refs(value, field, evidence, required=True, entity=entity_id)
     if person["status"] == "verified":
         _text(person.get("role"), "person.role")
+        authorship = _refs(person, "person", evidence, required=True)
+        _require(any(e["kind"] in AUTHORSHIP_KINDS and person["id"] in e["entity_ids"]
+                     and paper_id in e["entity_ids"] for e in authorship),
+                 "Verified person requires authorship evidence in person.evidence_ids binding both person.id and candidate.paper_id; use paper full text/abstract, an author homepage, or an organization page.")
     if relation["status"] == "verified":
         _require(person["status"] == "verified" and company["status"] == "verified",
                  "verified relationship requires verified person and company")
@@ -378,6 +411,56 @@ def _link(title, url):
     return "[{}]({})".format(_md(title).replace("[", "\\[").replace("]", "\\]"), safe)
 
 
+def _commit_render(artifacts, obsolete, data_dir):
+    """Stage every output and roll back file changes if publication fails."""
+    staging = Path(tempfile.mkdtemp(prefix=".scout-render-", dir=str(data_dir)))
+    previous, staged, changed = {}, {}, []
+    preserve_backups = False
+    try:
+        for index, (path, content) in enumerate(artifacts.items()):
+            staged[path] = staging / ("new-" + str(index))
+            staged[path].write_text(content, encoding="utf-8")
+        for index, path in enumerate(list(artifacts) + obsolete):
+            _require(not path.is_symlink(), "Refusing to replace a symlink output: " + str(path))
+            previous[path] = None
+            if path.exists():
+                backup = staging / ("old-" + str(index))
+                shutil.copyfile(path, backup)
+                previous[path] = backup
+        for path, temporary in staged.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            # A replacement may finish and then be interrupted before returning.
+            changed.append(path)
+            os.replace(temporary, path)
+        for path in obsolete:
+            changed.append(path)
+            path.unlink()
+    except BaseException:
+        # Keep recovery files if rollback itself is interrupted. Cleanup becomes
+        # safe only after every old output has been restored successfully.
+        preserve_backups = True
+        rollback_errors = []
+        for path in reversed(changed):
+            try:
+                if previous[path] is None:
+                    if path.exists():
+                        path.unlink()
+                else:
+                    os.replace(previous[path], path)
+            except OSError as exc:
+                rollback_errors.append(str(exc))
+        if rollback_errors:
+            raise OSError("Render publication and rollback failed; recovery files kept at {}: {}".format(staging, "; ".join(rollback_errors)))
+        preserve_backups = False
+        raise
+    finally:
+        if not preserve_backups:
+            try:
+                shutil.rmtree(staging)
+            except OSError as exc:
+                print("scout: output publication status is unchanged; staging cleanup failed at {}: {}".format(staging, exc), file=sys.stderr)
+
+
 def render(review_path, data_dir, profile_path=None, top=10):
     _require(isinstance(top, int) and not isinstance(top, bool) and top > 0, "top must be a positive integer")
     review = _read_json(review_path)
@@ -399,7 +482,7 @@ def render(review_path, data_dir, profile_path=None, top=10):
         pid = _text(paper.get("id"), "paper.id")
         _require(pid not in papers, "duplicate paper id: " + pid)
         papers[pid] = paper
-    evidence = _evidence_index(review)
+    evidence = _evidence_index(review, as_of)
     candidates = review.get("candidates")
     _require(isinstance(candidates, list), "candidates must be an array")
     results = [assess_candidate(c, papers, evidence, profile, as_of=as_of) for c in candidates]
@@ -453,7 +536,6 @@ def render(review_path, data_dir, profile_path=None, top=10):
             _md(stage_label), "—" if result["score"] is None else "{:.2f}".format(result["score"]), result["status"]))
     if not displayed:
         rows.append("| — | 无可展示候选 | — | — | — | — | — | {} |".format(overall_status))
-    report_path.write_text("\n".join(rows) + "\n", encoding="utf-8")
     audit = {"schema_version": 1, "review_schema": REVIEW_SCHEMA, "run": bundle["run"],
              "as_of": as_of.isoformat(),
              "status": overall_status, "profile": profile, "selection": selection,
@@ -462,17 +544,42 @@ def render(review_path, data_dir, profile_path=None, top=10):
                         "displayed_scored": len(selected)},
              "evidence": review["evidence"], "results": results,
              "limitations": "Validation checks references and entity consistency, not whether cited pages substantiate human/model claims."}
-    _write_json(audit_path, audit)
     profile_paths = []
     generated = Path(data_dir) / "Researchers" / "generated" / run_id
+    _require(not generated.is_symlink(), "Generated run directory must not be a symlink: " + str(generated))
+    artifacts = {report_path: "\n".join(rows) + "\n"}
     for result in selected[:3]:
         person = result["candidate"]["person"]
         path = generated / (_stable_id("person", person["id"]) + ".md")
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("# {}\n\n自动生成；人工笔记请写在 Researchers/ 的其他路径。\n\n- Stable ID: {}\n- 角色: {}\n- 机构: {}\n- 推送分: {:.2f}\n- 证据与分项: [审核记录](../../../Research/{})\n- 来源论文: {}\n".format(
+        artifacts[path] = "# {}\n\n自动生成；人工笔记请写在 Researchers/ 的其他路径。\n\n- Stable ID: {}\n- 角色: {}\n- 机构: {}\n- 推送分: {:.2f}\n- 证据与分项: [审核记录](../../../Research/{})\n- 来源论文: {}\n".format(
             _md(person["name"]), _md(person["id"]), _md(person["role"]), _md(person.get("affiliation")), result["score"],
-            audit_path.name, _link(papers[result["paper_id"]].get("title"), papers[result["paper_id"]].get("url"))), encoding="utf-8")
+            audit_path.name, _link(papers[result["paper_id"]].get("title"), papers[result["paper_id"]].get("url")))
         profile_paths.append(str(path))
+    obsolete = []
+    previous_person_files = set()
+    if audit_path.exists():
+        previous_audit = _read_json(audit_path)
+        previous_run = previous_audit.get("run") if isinstance(previous_audit, dict) else None
+        _require(isinstance(previous_run, dict) and previous_run.get("id") == run_id,
+                 "Existing audit does not match this run; preserve it and choose another data directory.")
+        previous_results = previous_audit.get("results")
+        _require(isinstance(previous_results, list) and all(isinstance(r, dict) for r in previous_results),
+                 "Existing audit results are invalid; preserve it and choose another data directory.")
+        for previous_result in previous_results:
+            candidate = previous_result.get("candidate")
+            person = candidate.get("person") if isinstance(candidate, dict) else None
+            person_id = person.get("id") if isinstance(person, dict) else None
+            if isinstance(person_id, str):
+                previous_person_files.add(_stable_id("person", person_id) + ".md")
+    if generated.exists():
+        for path in generated.iterdir():
+            if (path.name in previous_person_files and path not in artifacts and not path.is_symlink() and path.is_file()
+                    and re.fullmatch(r"person-[a-f0-9]{16}\.md", path.name)
+                    and GENERATED_PROFILE_MARKER in path.read_text(encoding="utf-8")):
+                obsolete.append(path)
+    audit["generated_profiles"] = profile_paths
+    artifacts[audit_path] = json.dumps(audit, ensure_ascii=False, indent=2) + "\n"
+    _commit_render(artifacts, obsolete, Path(data_dir))
     return {"status": overall_status, "report": str(report_path), "evidence": str(audit_path), "profiles": profile_paths,
             "scored": len(unique), "needs_review": len(pending) + len(omitted)}
 
@@ -484,6 +591,7 @@ def main(argv=None):
     prepare_parser.add_argument("--papers", required=True)
     prepare_parser.add_argument("--out", required=True)
     prepare_parser.add_argument("--limit", type=int)
+    prepare_parser.add_argument("--overwrite", action="store_true", help="Explicitly reset an existing review output")
     render_parser = commands.add_parser("render", help="Validate and render a host-researched review package")
     render_parser.add_argument("--review", required=True)
     render_parser.add_argument("--data-dir", default="data")
@@ -492,7 +600,7 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         if args.command == "prepare":
-            review = prepare(args.papers, args.out, args.limit)
+            review = prepare(args.papers, args.out, args.limit, overwrite=args.overwrite)
             print(json.dumps({"review": str(args.out), "selected": len(review["candidates"]),
                               "unreviewed_omitted": len(review["selection"]["omitted_paper_ids"])}, ensure_ascii=False))
         else:

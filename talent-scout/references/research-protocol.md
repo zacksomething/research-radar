@@ -22,6 +22,8 @@ An illustrative evidence entry (replace every example fact before use):
 
 Allowed `kind` values: `paper_full_text`, `paper_abstract`, `code`, `independent_evaluation`, `author_homepage`, `organization`, `company`, `funding_announcement`, `database`, `news`, `other`. Reference an entry's `id` from the appropriate `evidence_ids` list. `entity_ids` must bind the evidence to the exact paper/person/company IDs used in the packet.
 
+For a verified person, at least one entry cited in `person.evidence_ids` must bind both that person's ID and the candidate's paper ID. The note should describe the author-to-paper match. Use the paper author block or a matching professional page; do not add entity IDs to a source that does not establish the relationship. All evidence must have `checked_at` on or before `as_of`, and a non-null `source_date` on or before `checked_at`. If refreshing an old review, update its snapshot and recheck the affected claims.
+
 Allowed relationship types: `founder`, `cofounder`, `employee`, `advisor`, `research_collaborator` (leave null when unknown). Default financing stages: `unknown`, `bootstrapped_confirmed`, `pre_seed`, `seed`, `angel`, `pre_a`, `pre_a_plus`, `a`, `a_plus`, `b`, `c_plus`, `public`, `acquired`. Confidence is `low`, `medium`, or `high`. See the synthetic review for a complete packet; its values are test fixtures, not reusable evidence.
 
 Sources by purpose:

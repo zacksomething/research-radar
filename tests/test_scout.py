@@ -1,8 +1,12 @@
 import copy
+import contextlib
+import io
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from research_radar import scout
 
@@ -36,7 +40,7 @@ def complete_candidate(review, known_company=False, stage="seed", confidence="hi
          "source_date": None, "kind": "paper_full_text", "entity_ids": [paper_id],
          "note": "Synthetic full text fixture; not a real evaluation"},
         {"id": "person", "url": "https://example.org/researcher", "checked_at": "2026-09-19",
-         "source_date": "2026-09-18", "kind": "author_homepage", "entity_ids": [person_id],
+         "source_date": "2026-09-18", "kind": "author_homepage", "entity_ids": [person_id, paper_id],
          "note": "Synthetic identity and professional location fixture"},
     ]
     for name, assessment in candidate["assessment"].items():
@@ -74,7 +78,7 @@ class ScoutTests(unittest.TestCase):
         path.write_text(json.dumps(data), encoding="utf-8")
 
     def prepared(self, limit=None):
-        review = scout.prepare(self.papers, self.review_path, limit)
+        review = scout.prepare(self.papers, self.review_path, limit, overwrite=True)
         review["as_of"] = "2026-09-19"
         return review
 
@@ -151,7 +155,7 @@ class ScoutTests(unittest.TestCase):
         self.assertEqual(audit["results"][0]["components"]["effective_stage"], "unknown")
 
     def test_undated_or_old_financing_never_hard_drops(self):
-        for date in (None, "2020-01-01", "2027-01-01"):
+        for date in (None, "2020-01-01"):
             with self.subTest(date=date):
                 review = self.prepared()
                 complete_candidate(review, known_company=True, stage="c_plus")
@@ -191,8 +195,8 @@ class ScoutTests(unittest.TestCase):
         review = self.prepared()
         complete_candidate(review, known_company=True, stage="c_plus")
         review["evidence"][-1]["checked_at"] = "2020-01-01"
-        _, audit = self.rendered(review)
-        self.assertEqual(audit["results"][0]["components"]["effective_stage"], "unknown")
+        with self.assertRaisesRegex(ValueError, "source_date is after checked_at"):
+            self.rendered(review)
 
     def test_financing_snapshot_is_stable_and_backwards_compatible(self):
         review = self.prepared()
@@ -264,6 +268,186 @@ class ScoutTests(unittest.TestCase):
         self.assertEqual(before, Path(second["report"]).read_bytes())
         self.assertEqual(notes.read_text(encoding="utf-8"), "Manually authored notes")
         self.assertTrue(all("/generated/" in path for path in second["profiles"]))
+
+    def test_prepare_preserves_existing_completed_review_unless_overwrite_is_explicit(self):
+        review = self.prepared()
+        complete_candidate(review)
+        review["candidates"][0]["notes"] = ["Manual research must survive accidental preparation"]
+        self.save(self.review_path, review)
+        previous = self.review_path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "already exists.*--overwrite"):
+            scout.prepare(self.papers, self.review_path)
+        self.assertEqual(self.review_path.read_bytes(), previous)
+        reset = scout.prepare(self.papers, self.review_path, overwrite=True)
+        self.assertEqual(reset["evidence"], [])
+        self.assertEqual(reset["candidates"][0]["review_status"], "needs_review")
+
+    def test_prepare_never_overwrites_input_or_its_links(self):
+        before = self.papers.read_bytes()
+        aliases = [self.papers, self.root / "hardlink.json", self.root / "symlink.json"]
+        os.link(self.papers, aliases[1])
+        aliases[2].symlink_to(self.papers)
+        for alias in aliases:
+            with self.subTest(path=alias), self.assertRaisesRegex(ValueError, "must differ from the input"):
+                scout.prepare(self.papers, alias, overwrite=True)
+            self.assertEqual(self.papers.read_bytes(), before)
+
+    def test_prepare_preserves_source_named_like_the_old_temporary_file(self):
+        source = self.review_path.with_name(self.review_path.name + ".tmp")
+        self.save(source, self.bundle)
+        before = source.read_bytes()
+        review = scout.prepare(source, self.review_path)
+        self.assertEqual(source.read_bytes(), before)
+        self.assertEqual(review["paper_bundle"], self.bundle)
+        self.assertEqual(json.loads(self.review_path.read_text())["paper_bundle"], self.bundle)
+
+    def test_prepare_preserves_existing_user_tmp_file_and_cleans_its_own_on_failure(self):
+        user_tmp = self.review_path.with_name(self.review_path.name + ".tmp")
+        user_tmp.write_text("User content unrelated to preparation", encoding="utf-8")
+        before = user_tmp.read_bytes()
+        scout.prepare(self.papers, self.review_path)
+        previous_review = self.review_path.read_bytes()
+        self.assertEqual(user_tmp.read_bytes(), before)
+        with patch.object(scout.os, "replace", side_effect=OSError("Injected prepare publication failure")):
+            with self.assertRaisesRegex(OSError, "Injected prepare publication failure"):
+                scout.prepare(self.papers, self.review_path, overwrite=True)
+        self.assertEqual(user_tmp.read_bytes(), before)
+        self.assertEqual(self.review_path.read_bytes(), previous_review)
+        self.assertEqual(list(self.root.glob(".review.json.*.tmp")), [])
+
+    def test_prepare_cli_overwrite_is_explicit(self):
+        self.prepared()
+        args = ["prepare", "--papers", str(self.papers), "--out", str(self.review_path)]
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(scout.main(args), 2)
+            self.assertEqual(scout.main(args + ["--overwrite"]), 0)
+
+    def test_person_evidence_must_bind_the_candidate_to_the_paper(self):
+        review = self.prepared()
+        candidate = complete_candidate(review)
+        review["evidence"][1]["entity_ids"] = [candidate["person"]["id"]]
+        with self.assertRaisesRegex(ValueError, "authorship evidence.*person.id.*candidate.paper_id"):
+            self.rendered(review)
+        review["evidence"][1]["entity_ids"].append(candidate["paper_id"])
+        review["evidence"][1]["kind"] = "funding_announcement"
+        with self.assertRaisesRegex(ValueError, "authorship evidence"):
+            self.rendered(review)
+        review["evidence"][1]["kind"] = "author_homepage"
+        _, audit = self.rendered(review)
+        self.assertEqual(audit["results"][0]["status"], "scored")
+
+    def test_nonfinancing_evidence_dates_respect_review_snapshot(self):
+        for eid in ("paper", "person"):
+            review = self.prepared()
+            complete_candidate(review)
+            evidence = next(e for e in review["evidence"] if e["id"] == eid)
+            evidence["checked_at"] = "2027-01-02"
+            with self.subTest(evidence=eid), self.assertRaisesRegex(ValueError, "checked_at is after review.as_of"):
+                self.rendered(review)
+            evidence["checked_at"] = "2026-09-19"
+            evidence["source_date"] = "2026-09-20"
+            with self.subTest(evidence=eid), self.assertRaisesRegex(ValueError, "source_date is after checked_at"):
+                self.rendered(review)
+            evidence["source_date"] = None
+            _, audit = self.rendered(review)
+            self.assertEqual(audit["results"][0]["status"], "scored")
+
+    def test_rerender_removes_only_obsolete_tool_profiles_from_this_run(self):
+        review = self.prepared()
+        candidate = complete_candidate(review)
+        first, _ = self.rendered(review)
+        old_profile = Path(first["profiles"][0])
+        manual = old_profile.parent / "person-ffffffffffffffff.md"
+        manual.write_text("Manual file even though it resembles a generated profile\n" + scout.GENERATED_PROFILE_MARKER)
+        other_run = old_profile.parent.parent / "another-run" / old_profile.name
+        other_run.parent.mkdir()
+        other_run.write_bytes(old_profile.read_bytes())
+        symlink = old_profile.parent / "person-aaaaaaaaaaaaaaaa.md"
+        symlink.symlink_to(other_run)
+        candidate["triage"].update(relevant=False, reason="Reviewed as out of scope")
+        second, audit = self.rendered(review)
+        self.assertEqual(second["profiles"], [])
+        self.assertEqual(audit["generated_profiles"], [])
+        self.assertFalse(old_profile.exists())
+        self.assertTrue(manual.exists())
+        self.assertTrue(other_run.exists())
+        self.assertTrue(symlink.is_symlink())
+
+    def test_failed_render_commit_restores_previous_report_audit_and_profiles(self):
+        review = self.prepared()
+        candidate = complete_candidate(review)
+        first, _ = self.rendered(review)
+        paths = [Path(first["report"]), Path(first["evidence"])] + [Path(p) for p in first["profiles"]]
+        previous = {path: path.read_bytes() for path in paths}
+        candidate["triage"].update(relevant=False, reason="Reviewed as out of scope")
+        self.save(self.review_path, review)
+        replace = scout.os.replace
+        def fail_audit_once(source, destination):
+            if Path(destination) == Path(first["evidence"]) and Path(source).name.startswith("new-"):
+                raise OSError("Injected audit publication failure")
+            return replace(source, destination)
+        with patch.object(scout.os, "replace", side_effect=fail_audit_once):
+            with self.assertRaisesRegex(OSError, "Injected audit publication failure"):
+                scout.render(self.review_path, self.root / "data")
+        for path in paths:
+            self.assertEqual(path.read_bytes(), previous[path])
+        self.assertEqual(list((self.root / "data").glob(".scout-render-*")), [])
+
+    def test_staging_cleanup_failure_does_not_turn_published_output_into_failure(self):
+        review = self.prepared()
+        complete_candidate(review)
+        with patch.object(scout.shutil, "rmtree", side_effect=OSError("Injected cleanup failure")), contextlib.redirect_stderr(io.StringIO()) as warning:
+            result, audit = self.rendered(review)
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(audit["status"], "complete")
+        self.assertTrue(Path(result["profiles"][0]).exists())
+        self.assertIn("staging cleanup failed", warning.getvalue())
+
+    def test_keyboard_interrupt_after_real_replace_restores_every_old_output(self):
+        review = self.prepared()
+        candidate = complete_candidate(review)
+        first, _ = self.rendered(review)
+        paths = [Path(first["report"]), Path(first["evidence"])] + [Path(p) for p in first["profiles"]]
+        previous = {path: path.read_bytes() for path in paths}
+        candidate["assessment"]["technical"]["score"] = 1
+        self.save(self.review_path, review)
+        replace = scout.os.replace
+        for interrupted_path in paths:
+            with self.subTest(replaced_output=interrupted_path.name):
+                def interrupt_after_replace(source, destination):
+                    replace(source, destination)
+                    if Path(source).name.startswith("new-") and Path(destination) == interrupted_path:
+                        raise KeyboardInterrupt("Injected after completed replacement")
+                with patch.object(scout.os, "replace", side_effect=interrupt_after_replace):
+                    with self.assertRaises(KeyboardInterrupt):
+                        scout.render(self.review_path, self.root / "data")
+                for path in paths:
+                    self.assertEqual(path.read_bytes(), previous[path])
+                self.assertEqual(list((self.root / "data").glob(".scout-render-*")), [])
+
+    def test_interrupt_during_rollback_keeps_remaining_recovery_files(self):
+        review = self.prepared()
+        candidate = complete_candidate(review)
+        first, _ = self.rendered(review)
+        old_report = Path(first["report"]).read_bytes()
+        old_profile = Path(first["profiles"][0]).read_bytes()
+        candidate["assessment"]["technical"]["score"] = 1
+        self.save(self.review_path, review)
+        replace = scout.os.replace
+        def interrupt_during_recovery(source, destination):
+            replace(source, destination)
+            if Path(destination) == Path(first["evidence"]):
+                if Path(source).name.startswith("new-"):
+                    raise OSError("Injected publication failure after replacement")
+                raise KeyboardInterrupt("Injected interruption during rollback")
+        with patch.object(scout.os, "replace", side_effect=interrupt_during_recovery):
+            with self.assertRaises(KeyboardInterrupt):
+                scout.render(self.review_path, self.root / "data")
+        recovery_dirs = list((self.root / "data").glob(".scout-render-*"))
+        self.assertEqual(len(recovery_dirs), 1)
+        recovery_contents = [p.read_bytes() for p in recovery_dirs[0].glob("old-*")]
+        self.assertIn(old_report, recovery_contents)
+        self.assertIn(old_profile, recovery_contents)
 
     def test_omitted_candidates_remain_unreviewed(self):
         second = copy.deepcopy(self.bundle["papers"][0])

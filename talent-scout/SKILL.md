@@ -20,12 +20,14 @@ research-radar scout prepare --papers data/runs/RUN_ID/papers.json --out data/re
 
 Replace the entire `--papers` argument with the returned `paths.papers` value. `prepare` preserves original paper records. By default include all papers; `--limit N` is an explicit investigation budget and inherits input order, which may be prior-ranked. Omitted papers are not proven irrelevant. Review the omitted IDs before treating the result as exhaustive. Preserve incomplete source status in your delivery.
 
+Continue an investigation by editing its existing review packet. `prepare` refuses to overwrite a file; use a new output path for a new batch. `--overwrite` deliberately resets the packet to an empty review and discards prior research, so use it only when that reset is intended. Never use the paper bundle itself as the output path.
+
 ## Research and fill the review
 
 Read [the research protocol](references/research-protocol.md). The generated JSON defines every field; do not invent a parallel report schema. Use stable person and company IDs and keep existing evidence when revising a packet.
 
 1. Read the complete title and abstract. Set triage relevance, abstract-level interest, and a short reason. Do not use the prior as a quality gate. Check unmatched papers and correct mistaken topic assignments in the review narrative.
-2. Select candidates for deeper investigation within the user's scope. Read the paper's author block and relevant technical sections. Identify named authors with the paper title, coauthors, and a matching public profile. Record equal contribution and corresponding authors when supported; first position alone is not a founder or leadership claim.
+2. Select candidates for deeper investigation within the user's scope. Read the paper's author block and relevant technical sections. Identify named authors with the paper title, coauthors, and a matching public profile. In `person.evidence_ids`, cite evidence binding both the person ID and this paper ID; verifying a person's existence alone does not establish authorship. Record equal contribution and corresponding authors when supported; first position alone is not a founder or leadership claim.
 3. Verify the person's institution and their relationship to any company separately. Use the paper, official lab/person/company pages, and reliable public databases. A lab, university, employer, and startup are different entities.
 4. Investigate financing only for an identified company with a supported relationship. Prefer dated company/investor announcements and accessible dedicated sources. Record source date, checked date, entity ID, and the actual claim. No result means no public evidence found; an inaccessible source means inaccessible. Neither proves that the company is unfunded.
 5. Fill technical, team, thesis-fit, and reachability assessments with reasons and evidence references. Full-text/code evidence is needed to label a technical assessment as deeper than abstract-only. Use actual location, public contact channels and stated plans; do not infer nationality, ethnicity or relocation intent from a name.

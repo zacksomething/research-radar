@@ -90,7 +90,8 @@
       "source_date": "2026-01-01",
       "kind": "paper_full_text",
       "entity_ids": [
-        "synthetic:world-model-demo"
+        "synthetic:world-model-demo",
+        "synthetic-person-a"
       ],
       "note": "SYNTHETIC fixture standing in for a full-text review. No real paper exists and no URL was fetched."
     },
@@ -101,7 +102,8 @@
       "source_date": "2026-01-01",
       "kind": "author_homepage",
       "entity_ids": [
-        "synthetic-person-a"
+        "synthetic-person-a",
+        "synthetic:world-model-demo"
       ],
       "note": "SYNTHETIC fixture for a fictional researcher and professional contact. No real identity or contact is asserted."
     },
@@ -112,7 +114,8 @@
       "source_date": "2026-01-01",
       "kind": "paper_full_text",
       "entity_ids": [
-        "synthetic:robot-demo"
+        "synthetic:robot-demo",
+        "synthetic-person-b"
       ],
       "note": "SYNTHETIC fixture standing in for a full-text review. No real paper exists and no URL was fetched."
     },
@@ -123,7 +126,8 @@
       "source_date": "2026-01-01",
       "kind": "author_homepage",
       "entity_ids": [
-        "synthetic-person-b"
+        "synthetic-person-b",
+        "synthetic:robot-demo"
       ],
       "note": "SYNTHETIC fixture for a fictional researcher and professional contact. No real identity or contact is asserted."
     }
@@ -146,7 +150,8 @@
         "role": "Fictional demo researcher",
         "affiliation": "Synthetic Lab A",
         "evidence_ids": [
-          "synthetic-person-evidence-a"
+          "synthetic-person-evidence-a",
+          "synthetic-full-text-a"
         ]
       },
       "company": {
@@ -227,7 +232,8 @@
         "role": "Fictional demo researcher",
         "affiliation": "Synthetic Lab B",
         "evidence_ids": [
-          "synthetic-person-evidence-b"
+          "synthetic-person-evidence-b",
+          "synthetic-full-text-b"
         ]
       },
       "company": {
@@ -293,5 +299,6 @@
     }
   ],
   "synthetic_demo": true,
-  "disclaimer": "SYNTHETIC OFFLINE DEMO: all papers, people, institutions, evidence and scores are fictional test data. No websites, LLM APIs or financing databases were queried."
+  "disclaimer": "SYNTHETIC OFFLINE DEMO: all papers, people, institutions, evidence and scores are fictional test data. No websites, LLM APIs or financing databases were queried.",
+  "as_of": "2026-01-01"
 }

@@ -1,6 +1,7 @@
 """An explicitly fictional offline exercise of the collection and review pipeline."""
 
 import contextlib
+import hashlib
 import io
 import json
 import sys
@@ -20,6 +21,7 @@ def fill_synthetic_review(review):
     if set(papers) != SYNTHETIC_IDS or any("SYNTHETIC DEMO" not in paper["title"] for paper in papers.values()):
         raise ValueError("Synthetic review helper only accepts the two bundled fictional papers")
     review["synthetic_demo"] = True
+    review["as_of"] = "2026-01-01"
     review["disclaimer"] = DISCLAIMER
     review["paper_bundle"]["run"]["synthetic_demo"] = True
     review["paper_bundle"]["run"]["disclaimer"] = DISCLAIMER
@@ -37,7 +39,7 @@ def fill_synthetic_review(review):
                 "checked_at": "2026-01-01T00:00:00Z",
                 "source_date": "2026-01-01",
                 "kind": "paper_full_text",
-                "entity_ids": [paper["id"]],
+                "entity_ids": [paper["id"], person_id],
                 "note": "SYNTHETIC fixture standing in for a full-text review. No real paper exists and no URL was fetched.",
             },
             {
@@ -46,7 +48,7 @@ def fill_synthetic_review(review):
                 "checked_at": "2026-01-01T00:00:00Z",
                 "source_date": "2026-01-01",
                 "kind": "author_homepage",
-                "entity_ids": [person_id],
+                "entity_ids": [person_id, paper["id"]],
                 "note": "SYNTHETIC fixture for a fictional researcher and professional contact. No real identity or contact is asserted.",
             },
         ])
@@ -59,7 +61,7 @@ def fill_synthetic_review(review):
             "id": person_id, "name": "Synthetic Researcher " + suffix.upper(),
             "status": "verified", "role": "Fictional demo researcher",
             "affiliation": "Synthetic Lab " + suffix.upper(),
-            "evidence_ids": [person_evidence],
+            "evidence_ids": [person_evidence, paper_evidence],
         }
         for dimension in ("technical", "team", "thesis_fit", "reachability"):
             item = candidate["assessment"][dimension]
@@ -73,18 +75,48 @@ def fill_synthetic_review(review):
     return review
 
 
+def _check_existing_outputs(data_dir, fixture_text):
+    """Only reset a review whose exact bytes were saved by this demo."""
+    input_path = data_dir / "synthetic-input.json"
+    review_path = data_dir / "synthetic-review.json"
+    manifest_path = data_dir / "demo-manifest.json"
+    for path in (input_path, review_path, manifest_path):
+        if path.is_symlink() or (path.exists() and (not path.is_file() or path.stat().st_nlink != 1)):
+            raise ValueError("Refusing to overwrite a linked or non-file demo output: " + str(path))
+    if input_path.exists() and input_path.read_text(encoding="utf-8") != fixture_text:
+        raise ValueError("Existing synthetic-input.json differs from the bundled fixture; use a fresh demo directory")
+    if not review_path.exists():
+        if manifest_path.exists():
+            raise ValueError("Existing demo manifest has no matching review; use a fresh demo directory")
+        return
+    if not manifest_path.exists():
+        raise ValueError("Existing review has no demo ownership record; use a fresh demo directory")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    raw = review_path.read_bytes()
+    review = json.loads(raw)
+    owned = (isinstance(manifest, dict) and manifest.get("synthetic_demo") is True
+             and manifest.get("offline") is True and manifest.get("review") == str(review_path)
+             and manifest.get("review_sha256") == hashlib.sha256(raw).hexdigest()
+             and isinstance(review, dict) and review.get("synthetic_demo") is True
+             and review.get("disclaimer") == DISCLAIMER)
+    if not owned:
+        raise ValueError("Existing review was changed or is not owned by this demo version; use a fresh demo directory")
+
+
 def run_demo(data_dir):
     from . import collection, scout
 
     data_dir = Path(data_dir).resolve()
-    data_dir.mkdir(parents=True, exist_ok=True)
     source_path = Path(__file__).resolve().parent / "resources" / "synthetic_papers.json"
     input_path = data_dir / "synthetic-input.json"
-    input_path.write_text(source_path.read_text(encoding="utf-8"), encoding="utf-8")
     review_path = data_dir / "synthetic-review.json"
     manifest_path = data_dir / "demo-manifest.json"
     print(DISCLAIMER)
     try:
+        fixture_text = source_path.read_text(encoding="utf-8")
+        _check_existing_outputs(data_dir, fixture_text)
+        data_dir.mkdir(parents=True, exist_ok=True)
+        input_path.write_text(fixture_text, encoding="utf-8")
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             status = collection.main([
@@ -97,7 +129,7 @@ def run_demo(data_dir):
         if collected.get("status") not in {"complete", "success"}:
             raise ValueError("Offline collection did not complete: " + str(collected.get("status")))
         papers_path = Path(collected["paths"]["papers"])
-        review = scout.prepare(papers_path, review_path)
+        review = scout.prepare(papers_path, review_path, overwrite=True)
         fill_synthetic_review(review)
         review_path.write_text(json.dumps(review, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         rendered = scout.render(review_path, data_dir, top=2)
@@ -112,6 +144,7 @@ def run_demo(data_dir):
             "input": str(input_path),
             "papers": str(papers_path),
             "review": str(review_path),
+            "review_sha256": hashlib.sha256(review_path.read_bytes()).hexdigest(),
             "report": rendered["report"],
             "evidence": rendered["evidence"],
             "profiles": rendered["profiles"],

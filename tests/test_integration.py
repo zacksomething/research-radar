@@ -30,7 +30,7 @@ class CommandLineTests(unittest.TestCase):
             text=True,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), "0.1.0")
+        self.assertEqual(result.stdout.strip(), "0.1.1")
 
     def test_doctor_checks_bundled_configs_offline(self):
         output = io.StringIO()
@@ -53,6 +53,15 @@ class CommandLineTests(unittest.TestCase):
             report = json.loads(output.getvalue())
             self.assertEqual(status, 1)
             self.assertTrue(any(item["name"] == "clusters" and item["status"] == "error" for item in report["checks"]))
+
+    def test_doctor_accepts_collector_defaults_and_null_exclusions(self):
+        with tempfile.TemporaryDirectory() as directory:
+            config = Path(directory) / "minimal.yml"
+            config.write_text("clusters:\n  Topic:\n    include: [world model]\n    exclude: null\n", encoding="utf-8")
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                status = main(["doctor", "--config", str(config), "--json"])
+            self.assertEqual(status, 0, output.getvalue())
 
     def test_doctor_reports_missing_rubric(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -106,6 +115,48 @@ class CommandLineTests(unittest.TestCase):
     def test_synthetic_helper_rejects_real_input(self):
         with self.assertRaises(ValueError):
             fill_synthetic_review({"paper_bundle": {"papers": [{"id": "arxiv:2601.00001", "title": "A real-looking paper"}]}})
+
+    def test_demo_refuses_unowned_review_without_touching_other_data(self):
+        with tempfile.TemporaryDirectory() as directory:
+            review = Path(directory) / "synthetic-review.json"
+            review.write_text('{"candidates": [{"person": {"name": "Real researcher"}}]}', encoding="utf-8")
+            original = review.read_bytes()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(main(["demo", "--data-dir", directory]), 2)
+            self.assertEqual(review.read_bytes(), original)
+            self.assertFalse((Path(directory) / "synthetic-input.json").exists())
+            self.assertFalse((Path(directory) / "state").exists())
+
+    def test_demo_preserves_user_edits_to_previously_generated_review(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["demo", "--data-dir", directory]), 0)
+            review = Path(directory) / "synthetic-review.json"
+            data = json.loads(review.read_text(encoding="utf-8"))
+            data["candidates"][0]["person"]["name"] = "Real researcher added by user"
+            review.write_text(json.dumps(data), encoding="utf-8")
+            original = review.read_bytes()
+            state = (Path(directory) / "state" / "papers.json").read_bytes()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(main(["demo", "--data-dir", directory]), 2)
+            self.assertEqual(review.read_bytes(), original)
+            self.assertEqual((Path(directory) / "state" / "papers.json").read_bytes(), state)
+
+    def test_legacy_demo_without_ownership_hash_requests_fresh_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main(["demo", "--data-dir", directory]), 0)
+            manifest = Path(directory) / "demo-manifest.json"
+            data = json.loads(manifest.read_text(encoding="utf-8"))
+            del data["review_sha256"]
+            manifest.write_text(json.dumps(data), encoding="utf-8")
+            review = Path(directory) / "synthetic-review.json"
+            original = review.read_bytes()
+            errors = io.StringIO()
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(errors):
+                self.assertEqual(main(["demo", "--data-dir", directory]), 2)
+            self.assertIn("fresh demo directory", errors.getvalue())
+            self.assertEqual(review.read_bytes(), original)
 
     def test_public_synthetic_example_matches_packaged_fixture(self):
         root = Path(__file__).resolve().parents[1]

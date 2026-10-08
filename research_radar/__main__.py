@@ -38,9 +38,9 @@ def doctor(args):
     has_yaml = importlib.util.find_spec("yaml") is not None
     record("pyyaml", has_yaml, "Installed" if has_yaml else "Install the package dependencies with pip install .")
     resource_dir = Path(__file__).resolve().parent / "resources"
-    for name, override, filename, required in (
-        ("clusters", args.config, "clusters.yml", ("clusters", "sources")),
-        ("rubric", args.rubric, "scout_rubric.yml", ()),
+    for name, override, filename in (
+        ("clusters", args.config, "clusters.yml"),
+        ("rubric", args.rubric, "scout_rubric.yml"),
     ):
         config_path = override or resource_dir / filename
         if not config_path.is_file():
@@ -52,34 +52,15 @@ def doctor(args):
         try:
             import yaml
 
-            data = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-            if not isinstance(data, dict) or not data:
-                raise ValueError("Expected a nonempty YAML mapping")
-            for key in required:
-                if not isinstance(data.get(key), dict) or not data[key]:
-                    raise ValueError("Missing or empty mapping: " + key)
             if name == "clusters":
                 from .collection import load_config
 
                 load_config(config_path)
-                for cluster_name, cluster in data["clusters"].items():
-                    if not isinstance(cluster, dict):
-                        raise ValueError("Cluster must be a mapping: " + str(cluster_name))
-                    for field in ("include", "exclude"):
-                        values = cluster.get(field, [])
-                        if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
-                            raise ValueError(str(cluster_name) + "." + field + " must be a list of strings")
-                arxiv = data["sources"].get("arxiv")
-                if not isinstance(arxiv, dict):
-                    raise ValueError("sources.arxiv must be a mapping")
-                categories = arxiv.get("categories")
-                if not isinstance(categories, list) or not categories or not all(isinstance(item, str) for item in categories):
-                    raise ValueError("sources.arxiv.categories must be a nonempty list of strings")
             else:
                 from .scout import load_profile
 
                 load_profile(config_path)
-            record(name, True, "Valid local YAML: " + str(config_path))
+            record(name, True, "Valid local configuration: " + str(config_path))
         except (OSError, ValueError, TypeError, yaml.YAMLError) as exc:
             record(name, False, str(exc))
     for module in ("collection", "scout", "demo"):

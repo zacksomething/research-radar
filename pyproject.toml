@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "research-radar"
-version = "0.1.0"
+version = "0.1.1"
 description = "Evidence-aware paper discovery and research-team scouting, with local review workflows."
 requires-python = ">=3.9"
 dependencies = ["PyYAML>=6.0"]

@@ -1,6 +1,10 @@
 {
   "schema_version": 1,
-  "review_schema": "research-radar-scout/v1",
+  "review_schema": "research-radar-scout/v2",
+  "prepared_at": "2026-01-01",
+  "as_of": "2026-01-01",
+  "synthetic_demo": true,
+  "disclaimer": "SYNTHETIC OFFLINE DEMO: all papers, people, institutions, evidence and scores are fictional test data. No websites, LLM APIs or financing databases were queried.",
   "paper_bundle": {
     "schema_version": 1,
     "run": {
@@ -80,7 +84,9 @@
     "total": 2,
     "selected": 2,
     "omitted_paper_ids": [],
-    "method": "source_order; no prior threshold or ranking"
+    "method": "source_order; no prior threshold or ranking",
+    "mode": "paper",
+    "candidates": 2
   },
   "evidence": [
     {
@@ -152,7 +158,8 @@
         "evidence_ids": [
           "synthetic-person-evidence-a",
           "synthetic-full-text-a"
-        ]
+        ],
+        "listed_name": null
       },
       "company": {
         "id": null,
@@ -213,6 +220,10 @@
       "notes": [
         "SYNTHETIC OFFLINE DEMO: all papers, people, institutions, evidence and scores are fictional test data. No websites, LLM APIs or financing databases were queried.",
         "Unknown financing is not treated as unfunded or early-stage."
+      ],
+      "author_index": null,
+      "open_questions": [
+        "SYNTHETIC: company, relationship and financing were not researched."
       ]
     },
     {
@@ -234,7 +245,8 @@
         "evidence_ids": [
           "synthetic-person-evidence-b",
           "synthetic-full-text-b"
-        ]
+        ],
+        "listed_name": null
       },
       "company": {
         "id": null,
@@ -295,10 +307,11 @@
       "notes": [
         "SYNTHETIC OFFLINE DEMO: all papers, people, institutions, evidence and scores are fictional test data. No websites, LLM APIs or financing databases were queried.",
         "Unknown financing is not treated as unfunded or early-stage."
+      ],
+      "author_index": null,
+      "open_questions": [
+        "SYNTHETIC: company, relationship and financing were not researched."
       ]
     }
-  ],
-  "synthetic_demo": true,
-  "disclaimer": "SYNTHETIC OFFLINE DEMO: all papers, people, institutions, evidence and scores are fictional test data. No websites, LLM APIs or financing databases were queried.",
-  "as_of": "2026-01-01"
+  ]
 }

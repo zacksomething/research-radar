@@ -1,6 +1,6 @@
 # Deterministic research-priority score, not an investment recommendation.
 schema_version: 1
-version: "1.0"
+version: "2.0"
 weights:
   technical: 0.45
   team: 0.25
@@ -20,7 +20,7 @@ stage_multipliers:
   pre_a_plus: 1.0
   a: 1.0
   a_plus: 1.0
-  b: 0.6
+  b: 0.75  # never below unknown: researching financing must not lower a score
   c_plus: 0.0
   public: 0.0
   acquired: 0.0

@@ -1,0 +1,73 @@
+name: Publish release
+
+# Pushing a vX.Y.Z tag publishes exactly that commit. The tag must match the
+# package version and a CHANGELOG section; an existing release is never replaced.
+on:
+  push:
+    tags: ['v*.*.*']
+
+concurrency:
+  group: publish-${{ github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Build and validate the tagged source
+        run: |
+          python -m pip install build
+          python -m pip install .
+          python -m unittest discover -s tests -v
+          python -m build --wheel --outdir dist
+      - name: Check version, wheel and changelog
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          import hashlib, os, re, tomllib
+          from research_radar import __version__
+          tag = os.environ['RELEASE_TAG']
+          version = tomllib.loads(Path('pyproject.toml').read_text())['project']['version']
+          assert tag == 'v' + version == 'v' + __version__, (tag, version, __version__)
+          wheel = Path('dist/research_radar-%s-py3-none-any.whl' % version)
+          Path('dist/SHA256SUMS.txt').write_text(hashlib.sha256(wheel.read_bytes()).hexdigest() + '  ' + wheel.name + '\n')
+          changelog = Path('CHANGELOG.md').read_text(encoding='utf-8')
+          match = re.search(r'^## %s — .*?\n(.*?)(?=^## |\Z)' % re.escape(version), changelog, re.S | re.M)
+          assert match, 'CHANGELOG.md has no section for ' + version
+          notes = match.group(1).strip() + (
+              '\n\n### 安装与验证\n\n```bash\npython -m pip install %s\nresearch-radar doctor\n'
+              'research-radar demo --data-dir demo-%s\n```\n\n两个 skill 和安装脚本在 Source code 源码包中；'
+              'wheel 提供 Python CLI 和默认配置。SHA256SUMS.txt 用于校验安装包。\n' % (wheel.name, tag))
+          Path('dist/RELEASE_NOTES.md').write_text(notes, encoding='utf-8')
+          PY
+      - name: Verify the wheel outside the checkout
+        working-directory: ${{ runner.temp }}
+        run: |
+          python -m pip install --force-reinstall "$GITHUB_WORKSPACE"/dist/research_radar-*.whl
+          test "v$(research-radar --version)" = "$RELEASE_TAG"
+          research-radar doctor
+          research-radar demo --data-dir release-demo
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo 'Release already exists; refusing to replace its assets.'
+            exit 0
+          fi
+          gh release create "$RELEASE_TAG" dist/research_radar-*.whl dist/SHA256SUMS.txt \
+            --repo "$GITHUB_REPOSITORY" --verify-tag \
+            --title "Research Radar $RELEASE_TAG" --notes-file dist/RELEASE_NOTES.md --latest

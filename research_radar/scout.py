@@ -14,12 +14,15 @@ import re
 import shutil
 import sys
 import tempfile
+import unicodedata
+import ipaddress
 from urllib.parse import urlparse
 
 import yaml
 
 
-REVIEW_SCHEMA = "research-radar-scout/v1"
+REVIEW_SCHEMA = "research-radar-scout/v2"
+LEGACY_REVIEW_SCHEMA = "research-radar-scout/v1"
 STATUSES = {"verified", "ambiguous", "not_found", "inaccessible", "unknown", "stale"}
 ASSESSMENTS = ("technical", "team", "thesis_fit", "reachability")
 EVIDENCE_KINDS = {
@@ -28,6 +31,12 @@ EVIDENCE_KINDS = {
     "database", "news", "other",
 }
 AUTHORSHIP_KINDS = {"paper_full_text", "paper_abstract", "author_homepage", "organization"}
+TECHNICAL_KINDS = {"paper_full_text", "code", "independent_evaluation"}
+TEAM_KINDS = {"author_homepage", "organization", "company", "database", "news"}
+REACHABILITY_KINDS = {"author_homepage", "organization", "company"}
+RESERVED_TLDS = {"example", "invalid", "test", "localhost", "local"}
+RESERVED_DOMAINS = {"example.com", "example.net", "example.org"}
+SYNTHETIC_BANNER = "SYNTHETIC DEMO：合成数据，不是真实调查"
 GENERATED_PROFILE_MARKER = "自动生成；人工笔记请写在 Researchers/ 的其他路径。"
 
 
@@ -50,6 +59,33 @@ def _text(value, label):
 
 def _stable_id(prefix, value):
     return prefix + "-" + hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+
+
+def _today():
+    return dt.datetime.now(dt.timezone.utc).date()
+
+
+def _parse_date(value):
+    return dt.datetime.fromisoformat(value.replace("Z", "+00:00")).date()
+
+
+def normalized_name(value):
+    """Case, width, punctuation and token order do not distinguish one author name."""
+    text = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    return " ".join(sorted(re.sub(r"[\W_]+", " ", text).split()))
+
+
+def reserved_host(host):
+    """Documentation, test, local and private hosts cannot back a real claim."""
+    host = (host or "").rstrip(".").lower()
+    if host.rsplit(".", 1)[-1] in RESERVED_TLDS:
+        return True
+    if any(host == d or host.endswith("." + d) for d in RESERVED_DOMAINS):
+        return True
+    try:
+        return not ipaddress.ip_address(host.strip("[]")).is_global
+    except ValueError:
+        return False
 
 
 def _read_json(path):
@@ -75,19 +111,28 @@ def _write_json(path, value):
             temporary.unlink()
 
 
-def new_candidate(paper):
-    """Public template builder; all facts and assessments start unresolved."""
+def new_candidate(paper, author_index=None):
+    """Public template builder; all facts and assessments start unresolved.
+
+    ``author_index`` pins the candidate to one byline position. Without it the
+    host chooses one author and the name must match the paper's author list.
+    """
     assessment = {
         name: {"score": None, "reason": "", "evidence_ids": []}
         for name in ASSESSMENTS
     }
     assessment["technical"]["scope"] = "unknown"
+    key = paper["id"] if author_index is None else "{}#author-{}".format(paper["id"], author_index)
+    listed = None
+    if author_index is not None:
+        listed = paper["authors"][author_index].get("name")
     return {
-        "id": _stable_id("candidate", paper["id"]),
+        "id": _stable_id("candidate", key),
         "paper_id": paper["id"],
+        "author_index": author_index,
         "review_status": "needs_review",
         "triage": {"status": "unknown", "relevant": None, "abstract_score": None, "reason": ""},
-        "person": {"id": None, "name": None, "status": "unknown", "role": None,
+        "person": {"id": None, "name": None, "listed_name": listed, "status": "unknown", "role": None,
                    "affiliation": None, "evidence_ids": []},
         "company": {"id": None, "name": None, "status": "unknown", "evidence_ids": []},
         "relationship": {"status": "unknown", "type": None, "person_id": None,
@@ -97,11 +142,16 @@ def new_candidate(paper):
         "assessment": assessment,
         "visibility": {"status": "unknown", "value": "unknown", "evidence_ids": []},
         "notes": [],
+        # Must become a list (empty only when nothing remains open) before completion.
+        "open_questions": None,
     }
 
 
-def prepare(papers_path, output_path, limit=None, overwrite=False):
-    """Keep the complete source bundle; an explicit limit marks omitted papers."""
+def prepare(papers_path, output_path, limit=None, overwrite=False, per_author=False):
+    """Keep the complete source bundle; an explicit limit marks omitted papers.
+
+    ``per_author`` creates one candidate per byline author so a team can be mapped.
+    """
     source, destination = Path(papers_path), Path(output_path)
     same_file = source.resolve() == destination.resolve()
     if source.exists() and destination.exists():
@@ -127,19 +177,80 @@ def prepare(papers_path, output_path, limit=None, overwrite=False):
         seen.add(paper_id)
         _text(paper.get("title"), "paper.title")
     selected = papers if limit is None else papers[:limit]
+    candidates = []
+    for paper in selected:
+        authors = paper.get("authors") if isinstance(paper.get("authors"), list) else []
+        if per_author and authors:
+            candidates.extend(new_candidate(paper, index) for index in range(len(authors)))
+        else:
+            candidates.append(new_candidate(paper))
+    today = _today().isoformat()
     review = {
         "schema_version": 1,
         "review_schema": REVIEW_SCHEMA,
-        "as_of": dt.datetime.now(dt.timezone.utc).date().isoformat(),
+        "prepared_at": today,
+        # Research cutoff. Advance it with `scout refresh` when research continues later.
+        "as_of": today,
         "paper_bundle": bundle,
         "selection": {"limit": limit, "total": len(papers), "selected": len(selected),
+                      "mode": "per_author" if per_author else "paper", "candidates": len(candidates),
                       "omitted_paper_ids": [p["id"] for p in papers[len(selected):]],
                       "method": "input_order; explicit limit inherits upstream ordering (which may be prior-ranked); omitted papers remain unreviewed"},
         "evidence": [],
-        "candidates": [new_candidate(paper) for paper in selected],
+        "candidates": candidates,
     }
     _write_json(output_path, review)
     return review
+
+
+def _load_review_for_update(review_path, schema):
+    review = _read_json(review_path)
+    _require(isinstance(review, dict) and review.get("schema_version") == 1 and review.get("review_schema") == schema,
+             "expected review_schema " + schema)
+    return review
+
+
+def refresh(review_path, as_of=None):
+    """Advance the research cutoff in place; existing evidence and dates stay untouched."""
+    review = _load_review_for_update(review_path, REVIEW_SCHEMA)
+    _date(review.get("as_of"), "review.as_of")
+    current = _parse_date(review["as_of"])
+    target = _today() if as_of is None else _parse_date(_text(as_of, "as_of"))
+    _require(current <= target <= _today(), "new as_of must be between the current cutoff {} and today".format(current))
+    if target != current:
+        review.setdefault("as_of_history", []).append(current.isoformat())
+        review["as_of"] = target.isoformat()
+        _write_json(review_path, review)
+    return {"review": str(review_path), "previous_as_of": current.isoformat(), "as_of": review["as_of"]}
+
+
+def migrate(review_path):
+    """Upgrade a v1 packet in place, keeping a byte-for-byte backup of the original."""
+    path = Path(review_path)
+    raw = path.read_bytes()
+    review = _load_review_for_update(path, LEGACY_REVIEW_SCHEMA)
+    backup = path.with_name(path.name + ".v1-backup")
+    _require(not backup.exists() and not backup.is_symlink(), "Backup already exists: {}; move it before migrating".format(backup))
+    as_of = review.get("as_of") or review.get("paper_bundle", {}).get("run", {}).get("created_at")
+    _date(as_of, "review.as_of (or paper_bundle.run.created_at)")
+    as_of = _parse_date(as_of).isoformat()
+    review.update(review_schema=REVIEW_SCHEMA, as_of=as_of, prepared_at=review.get("prepared_at", as_of))
+    review.setdefault("selection", {}).setdefault("mode", "paper")
+    reopened = []
+    for candidate in review.get("candidates", []):
+        candidate.setdefault("author_index", None)
+        if isinstance(candidate.get("person"), dict):
+            candidate["person"].setdefault("listed_name", None)
+        candidate.setdefault("open_questions", None)
+        if candidate.get("review_status") == "complete" and candidate["open_questions"] is None:
+            # v1 never asked for remaining uncertainty; completion must be re-confirmed.
+            candidate["review_status"] = "needs_review"
+            candidate.setdefault("notes", []).append(
+                "Migrated from v1: record open_questions, check v2 evidence rules, then mark complete again.")
+            reopened.append(candidate.get("id"))
+    backup.write_bytes(raw)
+    _write_json(path, review)
+    return {"review": str(path), "backup": str(backup), "reopened_candidates": reopened}
 
 
 def load_profile(path=None):
@@ -160,9 +271,13 @@ def load_profile(path=None):
     for stage, value in stages.items():
         _text(stage, "stage key")
         _number(value, "stage multiplier " + stage, 0, 1)
+    floor = stages["unknown"]
     drops = profile.get("hard_drop_stages")
     _require(isinstance(drops, list) and all(stage in stages and stage != "unknown" for stage in drops),
              "hard_drop_stages must reference known, non-unknown stages")
+    # Otherwise skipping a financing check would outrank researching it.
+    low = sorted(stage for stage, value in stages.items() if stage not in drops and value < floor)
+    _require(not low, "stage multipliers below unknown ({}) reward skipped research: {}".format(floor, ", ".join(low)))
     bonuses = profile.get("visibility_bonus", {})
     _require(isinstance(bonuses, dict), "visibility_bonus must be an object")
     _require(set(bonuses) == {"unknown", "low", "medium", "high"}, "visibility_bonus needs unknown/low/medium/high")
@@ -185,7 +300,7 @@ def _date(value, label, nullable=False):
         raise ValueError(label + " must be an ISO date or timestamp")
 
 
-def _evidence_index(review, as_of):
+def _evidence_index(review, as_of, synthetic=False):
     items = review.get("evidence")
     _require(isinstance(items, list), "evidence must be an array")
     index = {}
@@ -196,14 +311,16 @@ def _evidence_index(review, as_of):
         url = urlparse(_text(item.get("url"), "evidence.url"))
         _require(url.scheme in {"http", "https"} and bool(url.netloc) and not url.username and not url.password,
                  "evidence.url must be a public HTTP(S) URL without credentials")
+        _require(synthetic or not reserved_host(url.hostname),
+                 "Evidence {} uses a reserved, local or private host ({}); replace placeholder URLs with the source actually checked.".format(eid, url.hostname))
         _date(item.get("checked_at"), "evidence.checked_at")
         _require("source_date" in item, "evidence.source_date is required (null allowed)")
         _date(item["source_date"], "evidence.source_date", nullable=True)
-        checked_date = dt.datetime.fromisoformat(item["checked_at"].replace("Z", "+00:00")).date()
+        checked_date = _parse_date(item["checked_at"])
         _require(checked_date <= as_of,
-                 "Evidence {} checked_at is after review.as_of {}; correct the date or review snapshot.".format(eid, as_of.isoformat()))
+                 "Evidence {} checked_at is after review.as_of {}; if research continued later, run `research-radar scout refresh --review ...` to advance the cutoff. Never backdate checked_at.".format(eid, as_of.isoformat()))
         if item["source_date"] is not None:
-            source_date = dt.datetime.fromisoformat(item["source_date"].replace("Z", "+00:00")).date()
+            source_date = _parse_date(item["source_date"])
             _require(source_date <= checked_date,
                      "Evidence {} source_date is after checked_at; verify both dates before rendering.".format(eid))
         _require(item.get("kind") in EVIDENCE_KINDS, "unsupported evidence.kind: " + str(item.get("kind")))
@@ -254,8 +371,7 @@ def _financing_freshness(financing, company, evidence, profile, as_of):
             continue
         if item["source_date"] is None:
             continue
-        source_date = dt.datetime.fromisoformat(item["source_date"].replace("Z", "+00:00")).date()
-        checked_date = dt.datetime.fromisoformat(item["checked_at"].replace("Z", "+00:00")).date()
+        source_date, checked_date = _parse_date(item["source_date"]), _parse_date(item["checked_at"])
         if (source_date <= checked_date <= as_of
                 and 0 <= (as_of - source_date).days <= max_age
                 and 0 <= (as_of - checked_date).days <= max_age):
@@ -272,6 +388,11 @@ def assess_candidate(candidate, papers, evidence, profile, as_of=None):
     cid = _text(candidate.get("id"), "candidate.id")
     paper_id = _text(candidate.get("paper_id"), "candidate.paper_id")
     _require(paper_id in papers, "candidate references an unknown paper: " + paper_id)
+    authors = papers[paper_id].get("authors") if isinstance(papers[paper_id].get("authors"), list) else []
+    author_index = candidate.get("author_index")
+    _require(author_index is None or (isinstance(author_index, int) and not isinstance(author_index, bool)
+                                      and 0 <= author_index < len(authors)),
+             "candidate.author_index must be null or a position in the paper's author list")
     review_status = candidate.get("review_status")
     _require(review_status in {"needs_review", "complete"}, "invalid review_status")
     triage = candidate.get("triage")
@@ -296,6 +417,16 @@ def assess_candidate(candidate, papers, evidence, profile, as_of=None):
         _require(any(e["kind"] in AUTHORSHIP_KINDS and person["id"] in e["entity_ids"]
                      and paper_id in e["entity_ids"] for e in authorship),
                  "Verified person requires authorship evidence in person.evidence_ids binding both person.id and candidate.paper_id; use paper full text/abstract, an author homepage, or an organization page.")
+        # IDs are chosen by the reviewer; the byline in the collected record is not.
+        names = [normalized_name(a.get("name")) for a in authors if isinstance(a, dict)]
+        if author_index is not None:
+            listed = names[author_index]
+            _require(normalized_name(person["name"]) == listed
+                     or normalized_name(person.get("listed_name")) == listed,
+                     "person.name or person.listed_name must match author #{} of paper {}".format(author_index, paper_id))
+        else:
+            _require(normalized_name(person["name"]) in names or normalized_name(person.get("listed_name")) in names,
+                     "Verified person {} is not in the author list of paper {}; set person.listed_name to the byline spelling when the names differ.".format(person["name"], paper_id))
     if relation["status"] == "verified":
         _require(person["status"] == "verified" and company["status"] == "verified",
                  "verified relationship requires verified person and company")
@@ -342,12 +473,14 @@ def assess_candidate(candidate, papers, evidence, profile, as_of=None):
         _require(bool(refs), "assessment." + name + " requires evidence")
         if name == "technical":
             _require(item.get("scope") == "full_text", "technical score requires full_text scope; abstract triage is separate")
-            _require(any(e["kind"] in {"paper_full_text", "code", "independent_evaluation"}
-                         and paper_id in e["entity_ids"] for e in refs),
+            _require(any(e["kind"] in TECHNICAL_KINDS and paper_id in e["entity_ids"] for e in refs),
                      "technical score requires substantive evidence bound to the paper")
         elif name in {"team", "reachability"}:
-            _require(person["status"] == "verified" and any(person["id"] in e["entity_ids"] for e in refs),
-                     name + " score requires evidence for the verified person")
+            # The paper itself shows authorship, not track record or a contact route.
+            kinds = TEAM_KINDS if name == "team" else REACHABILITY_KINDS
+            _require(person["status"] == "verified" and any(person["id"] in e["entity_ids"] and e["kind"] in kinds for e in refs),
+                     "{} score requires {} evidence for the verified person; paper text alone is not enough".format(
+                         name, "/".join(sorted(kinds))))
         elif name == "thesis_fit":
             _require(any(paper_id in e["entity_ids"] or (company.get("id") and company["id"] in e["entity_ids"]) for e in refs),
                      "thesis_fit score requires paper or company evidence")
@@ -355,7 +488,14 @@ def assess_candidate(candidate, papers, evidence, profile, as_of=None):
         missing.append("triage")
     if person["status"] != "verified":
         missing.append("person")
-    if review_status != "complete":
+    open_questions = candidate.get("open_questions")
+    _require(open_questions is None or (isinstance(open_questions, list)
+                                        and all(isinstance(q, str) and q.strip() for q in open_questions)),
+             "open_questions must be null or a list of nonempty text")
+    if review_status == "complete":
+        _require(isinstance(open_questions, list),
+                 "complete candidates must record open_questions explicitly (use [] only when nothing remains uncertain)")
+    else:
         missing.append("host_review_completion")
     result = {"candidate_id": cid, "paper_id": paper_id, "status": "needs_review", "score": None,
               "missing": missing, "reasons": [], "components": {}, "candidate": candidate}
@@ -464,16 +604,19 @@ def _commit_render(artifacts, obsolete, data_dir):
 def render(review_path, data_dir, profile_path=None, top=10):
     _require(isinstance(top, int) and not isinstance(top, bool) and top > 0, "top must be a positive integer")
     review = _read_json(review_path)
+    _require(not (isinstance(review, dict) and review.get("review_schema") == LEGACY_REVIEW_SCHEMA),
+             "This is a v1 review; run `research-radar scout migrate --review {}` first.".format(review_path))
     _require(isinstance(review, dict) and review.get("schema_version") == 1 and review.get("review_schema") == REVIEW_SCHEMA,
              "unsupported review schema")
+    synthetic = review.get("synthetic_demo") is True
     profile = load_profile(profile_path)
     bundle = review.get("paper_bundle")
     _require(isinstance(bundle, dict) and bundle.get("schema_version") == 1, "review needs original paper_bundle")
     _require(isinstance(bundle.get("run"), dict), "paper_bundle.run must be an object")
     run_id = _text(bundle["run"].get("id"), "run.id")
-    as_of_value = review.get("as_of") or bundle["run"].get("created_at") or bundle["run"].get("window", {}).get("end")
-    _date(as_of_value, "review.as_of (or run.created_at/window.end)")
-    as_of = dt.datetime.fromisoformat(as_of_value.replace("Z", "+00:00")).date()
+    _date(review.get("as_of"), "review.as_of")
+    as_of = _parse_date(review["as_of"])
+    _require(as_of <= _today(), "review.as_of is in the future")
     _require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", run_id) is not None, "run.id contains unsafe filename characters")
     _require(isinstance(bundle.get("papers"), list), "paper_bundle.papers must be an array")
     papers = {}
@@ -482,19 +625,26 @@ def render(review_path, data_dir, profile_path=None, top=10):
         pid = _text(paper.get("id"), "paper.id")
         _require(pid not in papers, "duplicate paper id: " + pid)
         papers[pid] = paper
-    evidence = _evidence_index(review, as_of)
+    _require(synthetic or bundle["run"].get("synthetic_demo") is not True,
+             "paper bundle is synthetic but the review is not marked synthetic_demo")
+    evidence = _evidence_index(review, as_of, synthetic=synthetic)
     candidates = review.get("candidates")
     _require(isinstance(candidates, list), "candidates must be an array")
     results = [assess_candidate(c, papers, evidence, profile, as_of=as_of) for c in candidates]
     _require(len({r["candidate_id"] for r in results}) == len(results), "duplicate candidate id")
-    _require(len({r["paper_id"] for r in results}) == len(results), "duplicate candidate paper_id")
+    # Several authors of one paper may be candidates; the same byline slot or person may not repeat.
+    slots = [(c["paper_id"], c.get("author_index")) for c in candidates if c.get("author_index") is not None]
+    _require(len(set(slots)) == len(slots), "duplicate candidate for the same paper author_index")
+    people = [(c["paper_id"], c["person"]["id"]) for c in candidates if c["person"].get("id")]
+    _require(len(set(people)) == len(people), "duplicate candidate for the same paper and person.id")
     omitted = sorted(set(papers) - {r["paper_id"] for r in results})
     selection = review.get("selection")
     _require(isinstance(selection, dict) and isinstance(selection.get("omitted_paper_ids"), list)
              and all(isinstance(value, str) for value in selection["omitted_paper_ids"])
              and sorted(selection["omitted_paper_ids"]) == omitted,
              "selection.omitted_paper_ids must account for every paper without a candidate")
-    _require(selection.get("total") == len(papers) and selection.get("selected") == len(results), "selection counts do not match bundle")
+    _require(selection.get("total") == len(papers) and selection.get("selected") == len({r["paper_id"] for r in results}),
+             "selection counts do not match bundle")
     ranked = sorted((r for r in results if r["status"] == "scored"), key=lambda r: (-r["score"], r["candidate_id"]))
     # Multiple papers about the same company/person yield one outreach suggestion.
     unique, seen_entities = [], set()
@@ -519,7 +669,8 @@ def render(review_path, data_dir, profile_path=None, top=10):
     stem = "团队雷达_" + run_id
     report_path = target / (stem + ".md")
     audit_path = target / (stem + ".evidence.json")
-    rows = ["# 团队雷达 {} · {} · 已评分 {} · 待审 {}\n".format(run_id, overall_status, len(unique), len(pending) + len(omitted)),
+    rows = ["# 团队雷达 {} · {} · 已评分 {} · 待审候选 {} · 未选论文 {}\n".format(
+                run_id, overall_status, len(unique), len(pending), len(omitted)),
             "| # | 论文 | 研究者 | 机构 | 公司/关系 | 阶段(置信) | 推送分 | 状态 |",
             "| --- | --- | --- | --- | --- | --- | --- | --- |"]
     for index, result in enumerate(displayed, 1):
@@ -534,10 +685,13 @@ def render(review_path, data_dir, profile_path=None, top=10):
             index, _link(paper.get("title", result["paper_id"]), paper.get("url")),
             _md(person.get("name")), _md(person.get("affiliation")), _md(company_label),
             _md(stage_label), "—" if result["score"] is None else "{:.2f}".format(result["score"]), result["status"]))
+    if synthetic:
+        rows.insert(1, "> " + SYNTHETIC_BANNER + "\n")
     if not displayed:
         rows.append("| — | 无可展示候选 | — | — | — | — | — | {} |".format(overall_status))
     audit = {"schema_version": 1, "review_schema": REVIEW_SCHEMA, "run": bundle["run"],
-             "as_of": as_of.isoformat(),
+             "as_of": as_of.isoformat(), "prepared_at": review.get("prepared_at"),
+             "as_of_history": review.get("as_of_history", []), "synthetic_demo": synthetic,
              "status": overall_status, "profile": profile, "selection": selection,
              "counts": {"scored_candidates": len(ranked), "unique_entities": len(unique),
                         "pending_candidates": len(pending), "omitted_unreviewed": len(omitted),
@@ -551,9 +705,10 @@ def render(review_path, data_dir, profile_path=None, top=10):
     for result in selected[:3]:
         person = result["candidate"]["person"]
         path = generated / (_stable_id("person", person["id"]) + ".md")
-        artifacts[path] = "# {}\n\n自动生成；人工笔记请写在 Researchers/ 的其他路径。\n\n- Stable ID: {}\n- 角色: {}\n- 机构: {}\n- 推送分: {:.2f}\n- 证据与分项: [审核记录](../../../Research/{})\n- 来源论文: {}\n".format(
+        artifacts[path] = "# {}\n\n自动生成；人工笔记请写在 Researchers/ 的其他路径。\n\n- Stable ID: {}\n- 角色: {}\n- 机构: {}\n- 推送分: {:.2f}\n- 证据与分项: [审核记录](../../../Research/{})\n- 来源论文: {}\n- 未决问题: {}\n".format(
             _md(person["name"]), _md(person["id"]), _md(person["role"]), _md(person.get("affiliation")), result["score"],
-            audit_path.name, _link(papers[result["paper_id"]].get("title"), papers[result["paper_id"]].get("url")))
+            audit_path.name, _link(papers[result["paper_id"]].get("title"), papers[result["paper_id"]].get("url")),
+            "；".join(_md(q) for q in result["candidate"]["open_questions"]) or "已记录为无")
         profile_paths.append(str(path))
     obsolete = []
     previous_person_files = set()
@@ -581,7 +736,8 @@ def render(review_path, data_dir, profile_path=None, top=10):
     artifacts[audit_path] = json.dumps(audit, ensure_ascii=False, indent=2) + "\n"
     _commit_render(artifacts, obsolete, Path(data_dir))
     return {"status": overall_status, "report": str(report_path), "evidence": str(audit_path), "profiles": profile_paths,
-            "scored": len(unique), "needs_review": len(pending) + len(omitted)}
+            "scored": len(unique), "needs_review": len(pending) + len(omitted),
+            "pending_candidates": len(pending), "omitted_papers": len(omitted)}
 
 
 def main(argv=None):
@@ -592,6 +748,12 @@ def main(argv=None):
     prepare_parser.add_argument("--out", required=True)
     prepare_parser.add_argument("--limit", type=int)
     prepare_parser.add_argument("--overwrite", action="store_true", help="Explicitly reset an existing review output")
+    prepare_parser.add_argument("--per-author", action="store_true", help="One candidate per byline author instead of per paper")
+    refresh_parser = commands.add_parser("refresh", help="Advance a review's research cutoff (as_of) before adding newer evidence")
+    refresh_parser.add_argument("--review", required=True)
+    refresh_parser.add_argument("--as-of", help="YYYY-MM-DD; default today (UTC)")
+    migrate_parser = commands.add_parser("migrate", help="Upgrade a v1 review in place and keep a .v1-backup copy")
+    migrate_parser.add_argument("--review", required=True)
     render_parser = commands.add_parser("render", help="Validate and render a host-researched review package")
     render_parser.add_argument("--review", required=True)
     render_parser.add_argument("--data-dir", default="data")
@@ -600,9 +762,14 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         if args.command == "prepare":
-            review = prepare(args.papers, args.out, args.limit, overwrite=args.overwrite)
-            print(json.dumps({"review": str(args.out), "selected": len(review["candidates"]),
+            review = prepare(args.papers, args.out, args.limit, overwrite=args.overwrite, per_author=args.per_author)
+            print(json.dumps({"review": str(args.out), "selected": review["selection"]["selected"],
+                              "candidates": len(review["candidates"]),
                               "unreviewed_omitted": len(review["selection"]["omitted_paper_ids"])}, ensure_ascii=False))
+        elif args.command == "refresh":
+            print(json.dumps(refresh(args.review, args.as_of), ensure_ascii=False))
+        elif args.command == "migrate":
+            print(json.dumps(migrate(args.review), ensure_ascii=False))
         else:
             print(json.dumps(render(args.review, args.data_dir, args.profile, args.top), ensure_ascii=False))
         return 0

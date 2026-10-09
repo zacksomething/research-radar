@@ -22,6 +22,7 @@ def fill_synthetic_review(review):
         raise ValueError("Synthetic review helper only accepts the two bundled fictional papers")
     review["synthetic_demo"] = True
     review["as_of"] = "2026-01-01"
+    review["prepared_at"] = "2026-01-01"
     review["disclaimer"] = DISCLAIMER
     review["paper_bundle"]["run"]["synthetic_demo"] = True
     review["paper_bundle"]["run"]["disclaimer"] = DISCLAIMER
@@ -72,6 +73,7 @@ def fill_synthetic_review(review):
                 item["scope"] = "full_text"
         # Company, relationship, financing and visibility remain explicitly unknown.
         candidate["notes"] = [DISCLAIMER, "Unknown financing is not treated as unfunded or early-stage."]
+        candidate["open_questions"] = ["SYNTHETIC: company, relationship and financing were not researched."]
     return review
 
 

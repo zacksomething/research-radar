@@ -33,4 +33,4 @@ Read the JSON summary printed by the CLI to find this run's `papers.json`, `run.
 
 ## Configuration and operation
 
-Defaults are packaged with Research Radar. Pass `--config /path/to/clusters.yml` for a custom topic profile; the YAML beside this skill is an editable example. The same data directory maintains cross-run state. Retry within the CLI's bounded retry policy; broaden the window only when it addresses a real coverage gap, not to fill a quota. Scheduling is optional host orchestration and is not installed by this skill.
+Defaults are packaged with Research Radar. Pass `--config /path/to/clusters.yml` for a custom topic profile; the YAML beside this skill is an editable example. The same data directory maintains cross-run state. If a source fails or is truncated, rerun the same command at most once; if it still fails, deliver the partial result with its status instead of looping. Broaden the window only when it addresses a real coverage gap, not to fill a quota. Scheduling is optional host orchestration and is not installed by this skill.

@@ -18,8 +18,9 @@ def bundle_fixture():
                 "window": {"start": "2026-09-18", "end": "2026-09-19"}, "sources": []},
         "papers": [
             {"id": "arxiv:synthetic-001", "title": "Synthetic paper, not a real finding",
-             "abstract": "Synthetic fixture only", "authors": [{"name": "Fixture Researcher", "affiliations": []}],
-             "url": "https://example.org/paper", "pdf_url": "https://example.org/paper.pdf",
+             "abstract": "Synthetic fixture only", "authors": [{"name": "Synthetic Researcher", "affiliations": []},
+                         {"name": "Second Author", "affiliations": []}],
+             "url": "https://fixture-host.net/paper", "pdf_url": "https://fixture-host.net/paper.pdf",
              "published": "2026-09-18", "updated": "2026-09-18", "sources": ["fixture"],
              "hf_upvotes": 0, "clusters": ["Test"], "primary_cluster": "Test", "prior": -2.0,
              "prior_signals": [], "change": "new"},
@@ -31,15 +32,16 @@ def complete_candidate(review, known_company=False, stage="seed", confidence="hi
     candidate = review["candidates"][0]
     paper_id, person_id, company_id = candidate["paper_id"], "synthetic:person:001", "synthetic:company:001"
     candidate["review_status"] = "complete"
+    candidate["open_questions"] = ["Synthetic fixture: no real uncertainty was investigated"]
     candidate["triage"] = {"status": "reviewed", "relevant": True, "abstract_score": 3,
                             "reason": "Synthetic relevance assessment"}
     candidate["person"] = {"id": person_id, "name": "Synthetic Researcher", "status": "verified",
                             "role": "co-first author", "affiliation": "Synthetic Lab", "evidence_ids": ["person"]}
     review["evidence"] = [
-        {"id": "paper", "url": "https://example.org/paper.pdf", "checked_at": "2026-09-19T08:00:00Z",
+        {"id": "paper", "url": "https://fixture-host.net/paper.pdf", "checked_at": "2026-09-19T08:00:00Z",
          "source_date": None, "kind": "paper_full_text", "entity_ids": [paper_id],
          "note": "Synthetic full text fixture; not a real evaluation"},
-        {"id": "person", "url": "https://example.org/researcher", "checked_at": "2026-09-19",
+        {"id": "person", "url": "https://fixture-host.net/researcher", "checked_at": "2026-09-19",
          "source_date": "2026-09-18", "kind": "author_homepage", "entity_ids": [person_id, paper_id],
          "note": "Synthetic identity and professional location fixture"},
     ]
@@ -54,10 +56,10 @@ def complete_candidate(review, known_company=False, stage="seed", confidence="hi
         candidate["financing"].update(status="verified", stage=stage, confidence=confidence,
                                       company_id=company_id, evidence_ids=["funding"])
         review["evidence"].extend([
-            {"id": "company", "url": "https://example.org/company", "checked_at": "2026-09-19",
+            {"id": "company", "url": "https://fixture-host.net/company", "checked_at": "2026-09-19",
              "source_date": None, "kind": "company", "entity_ids": [person_id, company_id],
              "note": "Synthetic company-founder link"},
-            {"id": "funding", "url": "https://example.org/funding", "checked_at": "2026-09-19",
+            {"id": "funding", "url": "https://fixture-host.net/funding", "checked_at": "2026-09-19",
              "source_date": "2026-09-17", "kind": "funding_announcement", "entity_ids": [company_id],
              "note": "Synthetic financing event"},
         ])
@@ -79,7 +81,7 @@ class ScoutTests(unittest.TestCase):
 
     def prepared(self, limit=None):
         review = scout.prepare(self.papers, self.review_path, limit, overwrite=True)
-        review["as_of"] = "2026-09-19"
+        review["as_of"] = review["prepared_at"] = "2026-09-19"
         return review
 
     def rendered(self, review):
@@ -198,13 +200,15 @@ class ScoutTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "source_date is after checked_at"):
             self.rendered(review)
 
-    def test_financing_snapshot_is_stable_and_backwards_compatible(self):
+    def test_financing_snapshot_is_stable_and_as_of_is_required(self):
         review = self.prepared()
         complete_candidate(review, known_company=True, stage="c_plus")
-        del review["as_of"]
         _, audit = self.rendered(review)
         self.assertEqual(audit["as_of"], "2026-09-19")
         self.assertEqual(audit["results"][0]["status"], "excluded_stage")
+        del review["as_of"]
+        with self.assertRaisesRegex(ValueError, "review.as_of"):
+            self.rendered(review)
 
     def test_missing_work_cannot_be_completed_by_flag_alone(self):
         review = self.prepared()
@@ -248,7 +252,7 @@ class ScoutTests(unittest.TestCase):
         candidate["company"].update(status="inaccessible", reason="Login required")
         with self.assertRaisesRegex(ValueError, "requires evidence"):
             self.rendered(review)
-        review["evidence"].append({"id": "attempt", "url": "https://example.org/directory",
+        review["evidence"].append({"id": "attempt", "url": "https://fixture-host.net/directory",
                                    "checked_at": "2026-09-19", "source_date": None,
                                    "kind": "database", "entity_ids": [], "note": "Synthetic login wall"})
         candidate["company"]["evidence_ids"] = ["attempt"]
@@ -478,6 +482,160 @@ class ScoutTests(unittest.TestCase):
             self.prepared(limit=0)
         with self.assertRaisesRegex(ValueError, "positive integer"):
             scout.render(self.review_path, self.root, top=0)
+
+    # --- v0.2.0 adversarial regressions ---
+
+    def test_verified_person_must_appear_in_the_paper_byline(self):
+        review = self.prepared()
+        candidate = complete_candidate(review)
+        candidate["person"]["name"] = "Totally Different Person"
+        with self.assertRaisesRegex(ValueError, "not in the author list"):
+            self.rendered(review)
+        candidate["person"]["listed_name"] = "researcher, SYNTHETIC"
+        _, audit = self.rendered(review)
+        self.assertEqual(audit["results"][0]["status"], "scored")
+
+    def test_author_index_pins_the_byline_slot(self):
+        review = self.prepared()
+        candidate = complete_candidate(review)
+        candidate["author_index"] = 1
+        with self.assertRaisesRegex(ValueError, "author #1"):
+            self.rendered(review)
+        candidate["author_index"] = 5
+        with self.assertRaisesRegex(ValueError, "author_index"):
+            self.rendered(review)
+
+    def test_single_paper_source_cannot_back_team_and_reachability(self):
+        review = self.prepared()
+        candidate = complete_candidate(review)
+        review["evidence"][0]["entity_ids"].append(candidate["person"]["id"])
+        for name in ("team", "reachability"):
+            candidate["assessment"][name]["evidence_ids"] = ["paper"]
+            with self.subTest(dimension=name), self.assertRaisesRegex(ValueError, name + " score requires"):
+                self.rendered(review)
+            candidate["assessment"][name]["evidence_ids"] = ["person"]
+
+    def test_placeholder_and_private_hosts_are_rejected_outside_demo(self):
+        for url in ("https://example.org/x", "https://foo.example/x", "https://site.invalid/x",
+                    "http://localhost/x", "http://127.0.0.1/x", "http://10.0.0.2/x"):
+            review = self.prepared()
+            complete_candidate(review)
+            review["evidence"][0]["url"] = url
+            with self.subTest(url=url), self.assertRaisesRegex(ValueError, "reserved, local or private host"):
+                self.rendered(review)
+
+    def test_synthetic_bundle_cannot_be_rendered_as_real_review(self):
+        review = self.prepared()
+        complete_candidate(review)
+        review["paper_bundle"]["run"]["synthetic_demo"] = True
+        with self.assertRaisesRegex(ValueError, "synthetic"):
+            self.rendered(review)
+
+    def test_complete_requires_explicit_open_questions(self):
+        review = self.prepared()
+        candidate = complete_candidate(review)
+        candidate["open_questions"] = None
+        with self.assertRaisesRegex(ValueError, "open_questions"):
+            self.rendered(review)
+        candidate["open_questions"] = []
+        _, audit = self.rendered(review)
+        self.assertEqual(audit["results"][0]["status"], "scored")
+
+    def test_per_author_prepare_maps_the_whole_team(self):
+        review = scout.prepare(self.papers, self.review_path, per_author=True, overwrite=True)
+        self.assertEqual([c["author_index"] for c in review["candidates"]], [0, 1])
+        self.assertEqual(review["candidates"][1]["person"]["listed_name"], "Second Author")
+        self.assertEqual(len({c["id"] for c in review["candidates"]}), 2)
+        review["as_of"] = "2026-09-19"
+        first = complete_candidate(review)
+        second = review["candidates"][1]
+        second["person"]["id"] = "synthetic:person:002"
+        _, audit = self.rendered(review)
+        self.assertEqual(audit["selection"]["selected"], 1)
+        self.assertEqual([r["status"] for r in audit["results"]], ["scored", "needs_review"])
+        second["person"]["id"] = first["person"]["id"]
+        with self.assertRaisesRegex(ValueError, "same paper and person.id"):
+            self.rendered(review)
+
+    def test_refresh_advances_cutoff_for_multi_day_research(self):
+        review = self.prepared()
+        complete_candidate(review)
+        review["evidence"][0]["checked_at"] = "2026-09-21"
+        with self.assertRaisesRegex(ValueError, "scout refresh"):
+            self.rendered(review)
+        self.save(self.review_path, review)
+        with self.assertRaisesRegex(ValueError, "between"):
+            scout.refresh(self.review_path, "2026-09-01")
+        with patch.object(scout, "_today", return_value=scout.dt.date(2026, 9, 22)):
+            with self.assertRaisesRegex(ValueError, "between"):
+                scout.refresh(self.review_path, "2026-09-23")
+            changed = scout.refresh(self.review_path, "2026-09-21")
+            self.assertEqual(changed["previous_as_of"], "2026-09-19")
+            result = scout.render(self.review_path, self.root / "data")
+        saved = json.loads(self.review_path.read_text(encoding="utf-8"))
+        self.assertEqual(saved["as_of_history"], ["2026-09-19"])
+        self.assertEqual(saved["prepared_at"], "2026-09-19")
+        self.assertEqual(result["status"], "complete")
+
+    def test_future_as_of_is_rejected(self):
+        review = self.prepared()
+        complete_candidate(review)
+        review["as_of"] = "2999-01-01"
+        with self.assertRaisesRegex(ValueError, "future"):
+            self.rendered(review)
+
+    def test_researching_financing_never_scores_below_skipping_it(self):
+        review = self.prepared()
+        complete_candidate(review)
+        _, audit = self.rendered(review)
+        unknown_score = audit["results"][0]["score"]
+        for stage in ("b", "seed", "a"):
+            review = self.prepared()
+            complete_candidate(review, known_company=True, stage=stage)
+            _, audit = self.rendered(review)
+            with self.subTest(stage=stage):
+                self.assertGreaterEqual(audit["results"][0]["score"], unknown_score)
+        profile = scout.load_profile()
+        profile["stage_multipliers"]["b"] = 0.5
+        path = self.root / "punishing.yml"
+        path.write_text(json.dumps(profile), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "below unknown"):
+            scout.load_profile(path)
+
+    def test_v1_review_is_refused_then_migrated_with_backup(self):
+        review = self.prepared()
+        complete_candidate(review)
+        review["review_schema"] = scout.LEGACY_REVIEW_SCHEMA
+        for key in ("prepared_at",):
+            review.pop(key)
+        for candidate in review["candidates"]:
+            for key in ("author_index", "open_questions"):
+                candidate.pop(key)
+        self.save(self.review_path, review)
+        original = self.review_path.read_bytes()
+        with self.assertRaisesRegex(ValueError, "scout migrate"):
+            scout.render(self.review_path, self.root / "data")
+        outcome = scout.migrate(self.review_path)
+        self.assertEqual(Path(outcome["backup"]).read_bytes(), original)
+        self.assertEqual(outcome["reopened_candidates"], [review["candidates"][0]["id"]])
+        result = scout.render(self.review_path, self.root / "data")
+        self.assertEqual(result["status"], "needs_review")
+        with self.assertRaisesRegex(ValueError, "expected review_schema"):
+            scout.migrate(self.review_path)
+
+    def test_cli_exposes_per_author_refresh_and_migrate(self):
+        with contextlib.redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(scout.main(["prepare", "--papers", str(self.papers), "--out", str(self.review_path), "--per-author"]), 0)
+        self.assertEqual(json.loads(output.getvalue())["candidates"], 2)
+        with contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(scout.main(["refresh", "--review", str(self.review_path)]), 0)
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            self.assertEqual(scout.main(["migrate", "--review", str(self.review_path)]), 2)
+
+    def test_demo_report_is_labeled_synthetic(self):
+        root = Path(__file__).resolve().parents[1]
+        result = scout.render(root / "examples" / "synthetic_review.json", self.root / "demo")
+        self.assertIn(scout.SYNTHETIC_BANNER, Path(result["report"]).read_text(encoding="utf-8"))
 
     def test_main_returns_nonzero_for_missing_review(self):
         self.assertEqual(scout.main(["render", "--review", str(self.root / "missing.json")]), 2)

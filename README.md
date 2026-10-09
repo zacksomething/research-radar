@@ -76,13 +76,27 @@ data/
 research-radar scout prepare --papers data/runs/RUN_ID/papers.json --out data/review.json
 ```
 
-让宿主执行 [talent-scout](talent-scout/SKILL.md)，读取完整论文、核对公开来源并填写 `review.json`。`prepare` 默认创建所有论文的待评审记录；`--limit N` 可限制本次研究预算，并明确列出省略的论文。空模板保持 `needs_review`，不能直接冒充完成的调查。
+让宿主执行 [talent-scout](talent-scout/SKILL.md)，读取完整论文、核对公开来源并填写 `review.json`。`prepare` 默认为每篇论文创建一条待评审记录；加 `--per-author` 则为每位署名作者各建一条，用于调查整个团队。`--limit N` 可限制本次研究预算，并明确列出省略的论文。空模板保持 `needs_review`，不能直接冒充完成的调查。
 
 已有评审文件默认拒绝覆盖。继续调查时直接编辑原来的 `review.json`；为新的采集批次指定新的 `--out` 路径。只有决定丢弃旧评审、重新生成空模板时才加 `--overwrite`，且输出不能与输入论文包是同一个文件。
 
 研究包将人物、机构、公司、人物与公司的关系、融资阶段分开记录。证据需要 URL、检查日期、来源日期（可未知）、适用实体 ID 及支持的具体事实。无法访问、未找到和身份不明确都有独立状态；没有融资信息不等于未融资。
 
-确认人物身份时，`person.evidence_ids` 至少引用一条同时绑定该人物和该论文的证据，例如论文作者栏或列出该论文的作者主页。证据检查日期不能晚于研究包的 `as_of`，来源日期也不能晚于检查日期。旧评审如不满足这些条件，需补充真实证据或恢复为未知状态后再渲染。
+确认人物身份时，`person.name` 必须与论文署名中的某位作者一致（忽略大小写、标点和姓名顺序）；公开姓名与署名拼写不同时，把署名写法填在 `person.listed_name`。`person.evidence_ids` 还须至少引用一条同时绑定该人物和该论文的证据，例如论文作者栏或列出该论文的作者主页。
+
+团队分项需要论文之外的来源（作者主页、机构、公司、数据库或新闻）；联系可达性需要作者主页、机构或公司页面。真实评审中，`example.org`、`*.invalid`、`localhost`、内网 IP 等占位或私有地址会被拒绝。标为 complete 的候选必须填写 `open_questions` 列表，没有未决问题时显式写 `[]`。
+
+`as_of` 是研究截止日，证据检查日期不能晚于它，来源日期也不能晚于检查日期。隔天继续调查时先运行：
+
+```bash
+research-radar scout refresh --review data/review.json
+```
+
+它把 `as_of` 推进到今天并在 `as_of_history` 中保留旧值。不要回填虚假的检查日期。0.1.x 的评审需先升级（保留 `.v1-backup` 原文件，已完成的候选会重新打开待确认）：
+
+```bash
+research-radar scout migrate --review data/review.json
+```
 
 填写后运行：
 
@@ -115,7 +129,7 @@ research-radar scout render --review data/review.json --profile talent-scout/sco
 min(10, 10 × Σ(权重 × 分项分数 / 5) × 阶段系数 × (1 + 可见度加成))
 ```
 
-未知或无法归属的融资阶段使用明确的 0.75 系数，不享受低可见度加成。只有已确认的创始人/联合创始人关系和中高置信度融资证据，才允许使用公司阶段或按 C 轮以上/上市/全资收购规则排除。雇员、顾问和研究合作者不会借用雇主的轮次。缺失的技术/团队评审不会自动填零或虚构分数。
+未知或无法归属的融资阶段使用明确的 0.75 系数，不享受低可见度加成。查实的非排除阶段系数不得低于未知阶段（B 轮默认 0.75），否则“不查融资”会比“查了融资”得分更高；配置违反此规则时 `doctor` 和 `render` 会报错。只有已确认的创始人/联合创始人关系和中高置信度融资证据，才允许使用公司阶段或按 C 轮以上/上市/全资收购规则排除。雇员、顾问和研究合作者不会借用雇主的轮次。缺失的技术/团队评审不会自动填零或虚构分数。
 
 `prepare` 固定研究包的 `as_of` 日期，重复渲染使用该日期评估时效。默认只使用该日期前 365 天内的融资证据；缺日期、未来日期或过期证据均不参与阶段判断。可在配置中调整 `financing_max_age_days`。这是一项保守的研究规则，旧公告不证明当前仍处于同一轮次；重新调查时应更新证据及 `as_of`。
 
@@ -148,6 +162,8 @@ python -m unittest discover -s tests -v
 python -m research_radar demo --data-dir demo-output
 python -m pip wheel --no-deps . --wheel-dir dist
 ```
+
+推送 `vX.Y.Z` 标签会触发发布流程：版本号、包版本和 CHANGELOG 段落必须一致，已存在的 release 不会被替换。演示与验收步骤见 [docs/演示runbook.md](docs/演示runbook.md)。
 
 GitHub Actions 在 Python 3.9 和 3.12 上执行离线测试、完整 demo，并验证安装后从其他目录仍可读取包内配置。测试覆盖字段完整性、来源失败、重跑去重、评分边界、错误公司关联、缺失证据和未知融资。
 

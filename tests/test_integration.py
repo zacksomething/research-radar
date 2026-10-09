@@ -30,7 +30,7 @@ class CommandLineTests(unittest.TestCase):
             text=True,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), "0.1.1")
+        self.assertEqual(result.stdout.strip(), "0.2.0")
 
     def test_doctor_checks_bundled_configs_offline(self):
         output = io.StringIO()
@@ -163,6 +163,14 @@ class CommandLineTests(unittest.TestCase):
         example = root / "examples" / "synthetic_papers.json"
         bundled = root / "research_radar" / "resources" / "synthetic_papers.json"
         self.assertEqual(json.loads(example.read_text(encoding="utf-8")), json.loads(bundled.read_text(encoding="utf-8")))
+
+    def test_skill_config_copies_match_packaged_defaults(self):
+        root = Path(__file__).resolve().parents[1]
+        for copy, bundled in (("paper-sweep/clusters.yml", "clusters.yml"),
+                              ("talent-scout/scout_rubric.yml", "scout_rubric.yml")):
+            with self.subTest(copy=copy):
+                self.assertEqual((root / copy).read_bytes(),
+                                 (root / "research_radar" / "resources" / bundled).read_bytes())
 
     def test_public_review_example_renders_offline(self):
         review = Path(__file__).resolve().parents[1] / "examples" / "synthetic_review.json"

@@ -1,8 +1,8 @@
 # Research Radar
 
-把论文发现与团队研究接起来的两个 agent skills，以及可独立验证的本地 Python 工具。
+将论文发现、阅读初筛与研究者/团队背调整合为一体的统一 agent skill（[research-radar](research-radar/SKILL.md)），以及可独立验证的本地 Python 工具。
 
-`paper-sweep` 抓取 arXiv / Hugging Face 论文，保留完整摘要和作者，生成阅读清单。`talent-scout` 让宿主模型核对研究者、机构、公司及融资证据，再由脚本校验、评分和输出团队雷达。两者共享同一份结构化论文数据。
+`research-radar` 支持按任务目标执行两阶段研究漏斗：**第一阶段（`sweep`）** 抓取 arXiv / Hugging Face 论文或导入会议清单，保留完整摘要与作者，生成阅读清单；**第二阶段（`scout`）** 在同一份结构化论文包上由宿主模型核对研究者、机构、公司及融资证据，再由脚本校验、评分并输出团队雷达与研究者档案。只问论文时在第一阶段结束，不强行触发团队背调。
 
 **运行边界：**论文采集、去重、校验、评分和报告生成由 Python 执行；语义判断和联网查证由能浏览网页的宿主模型或研究者完成。CLI 不内置 LLM API，也不会自动把未调查的人判成创业者。无需额外模型 API key。定时执行需要宿主提供调度与研究能力，本项目不会默认创建定时任务。
 
@@ -37,12 +37,13 @@ demo 全部使用标为 **SYNTHETIC** 的合成论文、身份和证据，在不
 ```bash
 research-radar sweep --source both --days 2 --data-dir data
 research-radar sweep --source arxiv --days 7 --cluster World-Models --all --data-dir data
+research-radar sweep --source both --days 2 --cluster Unclassified --data-dir data
 research-radar sweep --source hf --date 2026-09-18 --data-dir data
 ```
 
 默认窗口结束日为 **UTC 昨天**。arXiv 以提交日期查询；HF 以精选日期查询，同时保留论文提交日期和 `hf_featured_dates`。所以“新提交”和“新受到关注”不会混成同一含义。
 
-机器输出保留所有采集记录，包括未命中关键词的论文；`--cluster`、`--top`、`--all` 控制 Markdown 阅读视图。prior 只用于粗略排序，不作为论文质量或 SOTA 结论。作者、摘要和机构关系不会为适应日报长度而裁剪。
+机器输出保留所有采集记录，包括未命中关键词的论文；`--cluster`（支持各赛道名、`Unclassified` 或 `all`）、`--top`、`--all` 控制 Markdown 阅读视图。prior 只用于粗略排序，不作为论文质量或 SOTA 结论。作者、摘要和机构关系不会为适应日报长度而裁剪。
 
 arXiv 论文保留可选 `arxiv_version`（正整数或 `null`）；旧状态文件无需手动迁移。明确的 `external:`、`doi:` 等外部编号保留原命名空间。导入时，若 arXiv ID、URL 或版本相互矛盾，该条记录会报告错误。
 
@@ -74,19 +75,21 @@ data/
 
 ```bash
 research-radar scout prepare --papers data/runs/RUN_ID/papers.json --out data/review.json
+research-radar scout prepare --papers data/runs/RUN_ID/papers.json --out data/world-models.json --cluster World-Models
+research-radar scout prepare --papers data/runs/RUN_ID/papers.json --out data/team.json --paper-id arxiv:XXXX.XXXXX --per-author
 ```
 
-让宿主执行 [talent-scout](talent-scout/SKILL.md)，读取完整论文、核对公开来源并填写 `review.json`。`prepare` 默认为每篇论文创建一条待评审记录；加 `--per-author` 则为每位署名作者各建一条，用于调查整个团队。`--limit N` 可限制本次研究预算，并明确列出省略的论文。空模板保持 `needs_review`，不能直接冒充完成的调查。
+让宿主执行 [research-radar](research-radar/SKILL.md) 的第二阶段（参考 [证据协议](research-radar/references/research-protocol.md)），读取完整论文、核对公开来源并填写 `review.json`。`prepare` 默认为每篇论文创建一条待评审记录；加 `--per-author` 则为每位署名作者各建一条，用于调查整个团队；可通过 `--cluster` 按赛道（或 `Unclassified`）筛选，或可重复传入 `--paper-id` 精准指定要展开的论文，避免把百人作者论文一并展开。`--limit N`、`--cluster` 或 `--paper-id` 省略的论文会明确记录在 `selection.omitted_paper_ids`。空模板保持 `needs_review`，不能直接冒充完成的调查。
 
 已有评审文件默认拒绝覆盖。继续调查时直接编辑原来的 `review.json`；为新的采集批次指定新的 `--out` 路径。只有决定丢弃旧评审、重新生成空模板时才加 `--overwrite`，且输出不能与输入论文包是同一个文件。
 
-研究包将人物、机构、公司、人物与公司的关系、融资阶段分开记录。证据需要 URL、检查日期、来源日期（可未知）、适用实体 ID 及支持的具体事实。无法访问、未找到和身份不明确都有独立状态；没有融资信息不等于未融资。
+研究包将人物、机构、公司、人物与公司的关系、融资阶段分开记录。证据需要 URL、检查日期、来源日期（可未知）、适用实体 ID 及支持的具体事实。无法访问、未找到、身份不明确与已过期都有独立状态，且须记录 `reason` 与尝试过的来源证据；没有融资信息不等于未融资。
 
-确认人物身份时，`person.name` 必须与论文署名中的某位作者一致（忽略大小写、标点和姓名顺序）；公开姓名与署名拼写不同时，把署名写法填在 `person.listed_name`。`person.evidence_ids` 还须至少引用一条同时绑定该人物和该论文的证据，例如论文作者栏或列出该论文的作者主页。
+确认人物身份时，`person.name` 必须与论文署名中的某位作者一致（忽略大小写、重音符、标点和姓名顺序）；公开姓名与署名拼写不同时，把署名写法填在 `person.listed_name`（报告与档案会显式标注差异）。`person.evidence_ids` 还须至少引用一条同时绑定该人物和该论文的证据，例如论文作者栏或列出该论文的作者主页。
 
-团队分项需要论文之外的来源（作者主页、机构、公司、数据库或新闻）；联系可达性需要作者主页、机构或公司页面。真实评审中，`example.org`、`*.invalid`、`localhost`、内网 IP 等占位或私有地址会被拒绝。标为 complete 的候选必须填写 `open_questions` 列表，没有未决问题时显式写 `[]`。
+团队分项需要论文之外的来源（作者主页、机构、公司、数据库或新闻）；联系可达性需要作者主页、机构或公司页面。真实评审中，`example.org`、`*.invalid`、`localhost`、单标签内网主机名、非标准 IP 写法及内网 IP 等占位或私有地址会被拒绝。标为 complete 的候选必须填写 `open_questions` 列表，没有未决问题时显式写 `[]`。
 
-`as_of` 是研究截止日，证据检查日期不能晚于它，来源日期也不能晚于检查日期。隔天继续调查时先运行：
+`as_of` 是研究截止日，证据检查日期不能晚于它，来源日期也不能晚于检查日期（带时区的时间戳会统一按 UTC 折算日期）。隔天继续调查时先运行：
 
 ```bash
 research-radar scout refresh --review data/review.json
@@ -98,9 +101,10 @@ research-radar scout refresh --review data/review.json
 research-radar scout migrate --review data/review.json
 ```
 
-填写后运行：
+填写过程中可先只读校验，确认无字段、日期或实体绑定错误后再渲染报告：
 
 ```bash
+research-radar scout validate --review data/review.json
 research-radar scout render --review data/review.json --data-dir data --top 10
 ```
 
@@ -116,11 +120,12 @@ research-radar scout render --review examples/synthetic_review.json --data-dir d
 
 ## 配置与评分
 
-默认配置在 `research_radar/resources/`。可修改两个 skill 旁的配置副本，并显式传入：
+默认配置在 `research_radar/resources/`。可修改统一 skill 目录下的配置模板（`research-radar/resources/`），并显式传入：
 
 ```bash
-research-radar sweep --config paper-sweep/clusters.yml --data-dir data
-research-radar scout render --review data/review.json --profile talent-scout/scout_rubric.yml --data-dir data
+research-radar doctor --config research-radar/resources/clusters.yml --profile research-radar/resources/scout_rubric.yml
+research-radar sweep --config research-radar/resources/clusters.yml --data-dir data
+research-radar scout render --review data/review.json --profile research-radar/resources/scout_rubric.yml --data-dir data
 ```
 
 四项评审分数为 0–5，默认权重：技术证据 45%、团队证据 25%、策略匹配 20%、联系可达性 10%。总分为：
@@ -135,15 +140,20 @@ min(10, 10 × Σ(权重 × 分项分数 / 5) × 阶段系数 × (1 + 可见度�
 
 这些权重是可复现的初始研究规则，尚未经过真实投资效果校准。摘要层面的兴趣分与阅读全文后的技术分相互独立。
 
-## 作为 skills 使用
+## 作为 skill 使用
 
-两个入口保留在 `paper-sweep/` 和 `talent-scout/`。先安装上面的 Python 包，再把它们复制到宿主的 skills 目录。例如：
+统一 skill 入口位于 `research-radar/`（包含 `SKILL.md`、`references/research-protocol.md` 及 `resources/` 配置模板）。先安装上面的 Python 包，再将其复制到宿主的 skills 目录。例如：
 
 ```bash
+# Codex
 python scripts/install_skills.py --target ~/.codex/skills
+# Antigravity（全局）或项目工作区（.agents/skills）
+python scripts/install_skills.py --target ~/.gemini/config/skills
+# Claude Code
+python scripts/install_skills.py --target ~/.claude/skills
 ```
 
-安装器默认不覆盖已有同名 skill；明确更新时加 `--replace`。覆盖前会检查源与目标是否重叠，并先暂存两个完整 skill；更新失败时保留或恢复原有安装。其他宿主可以指定自己的 skills 目录。宿主执行命令时必须使用已安装本项目的 Python 环境；可使用本项目 `.venv/bin/python` 的实际绝对路径。不要把开发者机器路径写进共享 skill。
+安装器发现已有 `research-radar`、`paper-sweep` 或 `talent-scout` 时默认停止，并提示使用 `--replace`。升级前请把自行修改的配置和其他文件备份到这三个目录之外，再用相同命令加 `--replace`。安装器会暂存新版、替换 `research-radar` 并移除两个旧目录。其他宿主可以指定自己的 skills 目录。宿主执行命令时必须使用已安装本项目的 Python 环境。若移动了仓库目录，请重建 `.venv` 或重新执行 `python -m pip install -e .`。
 
 ## 会议与其他来源
 

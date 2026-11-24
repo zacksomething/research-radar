@@ -58,12 +58,13 @@ def fill_synthetic_review(review):
             "status": "reviewed", "relevant": True, "abstract_score": 3,
             "reason": "Synthetic topic match supplied to test the offline review workflow.",
         }
-        candidate["person"] = {
+        candidate["person"].update({
             "id": person_id, "name": "Synthetic Researcher " + suffix.upper(),
+            "listed_name": None,
             "status": "verified", "role": "Fictional demo researcher",
             "affiliation": "Synthetic Lab " + suffix.upper(),
             "evidence_ids": [person_evidence, paper_evidence],
-        }
+        })
         for dimension in ("technical", "team", "thesis_fit", "reachability"):
             item = candidate["assessment"][dimension]
             item["score"] = 4 if suffix == "a" and dimension in {"technical", "thesis_fit"} else 3
@@ -118,7 +119,7 @@ def run_demo(data_dir):
         fixture_text = source_path.read_text(encoding="utf-8")
         _check_existing_outputs(data_dir, fixture_text)
         data_dir.mkdir(parents=True, exist_ok=True)
-        input_path.write_text(fixture_text, encoding="utf-8")
+        collection.atomic_text(input_path, fixture_text)
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             status = collection.main([
@@ -133,7 +134,7 @@ def run_demo(data_dir):
         papers_path = Path(collected["paths"]["papers"])
         review = scout.prepare(papers_path, review_path, overwrite=True)
         fill_synthetic_review(review)
-        review_path.write_text(json.dumps(review, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        scout._write_json(review_path, review)
         rendered = scout.render(review_path, data_dir, top=2)
         if rendered["status"] != "complete" or rendered["scored"] != 2:
             raise ValueError("Synthetic review did not produce two complete fictional candidates")
@@ -151,7 +152,7 @@ def run_demo(data_dir):
             "evidence": rendered["evidence"],
             "profiles": rendered["profiles"],
         }
-        manifest_path.write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        scout._write_json(manifest_path, manifest)
         print(json.dumps({"status": "complete", "synthetic_demo": True, "manifest": str(manifest_path), "report": rendered["report"]}, ensure_ascii=False))
         return 0
     except (OSError, ValueError, KeyError, TypeError) as exc:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Copy the two host-model skills into an explicitly selected skill directory."""
+"""Copy the unified research-radar skill into an explicitly selected skill directory."""
 import argparse
 from pathlib import Path
 import shutil
@@ -7,18 +7,20 @@ import sys
 import tempfile
 
 
-NAMES = ("paper-sweep", "talent-scout")
+NAMES = ("research-radar",)
+LEGACY_NAMES = ("paper-sweep", "talent-scout")
 
 
 def install(root, target, replace=False):
-    """Stage both skills before replacement, and restore old copies on failure."""
+    """Stage the unified skill before replacement, retire legacy split skills on --replace, and restore on failure."""
     root, target = Path(root).resolve(), Path(target).expanduser().resolve()
     sources = [root / name for name in NAMES]
     destinations = [target / name for name in NAMES]
+    legacy_destinations = [target / name for name in LEGACY_NAMES]
     for source in sources:
         if source.is_symlink() or not source.is_dir() or not (source / "SKILL.md").is_file():
             raise ValueError("Missing or invalid source skill: " + str(source))
-    for dest in destinations:
+    for dest in destinations + legacy_destinations:
         if dest.is_symlink():
             raise ValueError("Refusing to replace a symlink: " + str(dest))
         resolved = dest.resolve()
@@ -41,6 +43,9 @@ def install(root, target, replace=False):
         for name, source in zip(NAMES, sources):
             shutil.copytree(source, incoming / name, ignore=shutil.ignore_patterns("__pycache__", "*.pyc", ".DS_Store"))
         commit_started = True
+        for name, dest in zip(LEGACY_NAMES, legacy_destinations):
+            if dest.exists():
+                dest.rename(backups / name)
         for name, dest in zip(NAMES, destinations):
             if dest.exists():
                 dest.rename(backups / name)
@@ -55,6 +60,12 @@ def install(root, target, replace=False):
                     if not (incoming / name).exists() and dest.exists():
                         shutil.rmtree(dest)
                     if (backups / name).exists():
+                        (backups / name).rename(dest)
+                except BaseException as exc:
+                    rollback_errors.append(type(exc).__name__ + ": " + str(exc))
+            for name, dest in reversed(list(zip(LEGACY_NAMES, legacy_destinations))):
+                try:
+                    if (backups / name).exists() and not dest.exists():
                         (backups / name).rename(dest)
                 except BaseException as exc:
                     rollback_errors.append(type(exc).__name__ + ": " + str(exc))
@@ -75,7 +86,7 @@ def install(root, target, replace=False):
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", type=Path, required=True, help="Host's skills directory")
-    parser.add_argument("--replace", action="store_true", help="Replace only these two existing skill folders")
+    parser.add_argument("--replace", action="store_true", help="Replace existing research-radar and retire legacy paper-sweep/talent-scout folders")
     args = parser.parse_args(argv)
     root = Path(__file__).resolve().parent.parent
     try:
@@ -87,7 +98,7 @@ def main(argv=None):
         return 1
     for dest in destinations:
         print(dest)
-    print("Skills copied. The host must use the Python environment where research-radar is installed.")
+    print("Skill copied. The host must use the Python environment where research-radar is installed.")
     return 0
 
 

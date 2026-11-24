@@ -34,56 +34,71 @@ class InstallSkillsTests(unittest.TestCase):
             (self.target / name / "SKILL.md").write_text("old " + name, encoding="utf-8")
             (self.target / name / "personal.txt").write_text("keep " + name, encoding="utf-8")
 
+    def _previous_legacy(self):
+        for name in installer.LEGACY_NAMES:
+            (self.target / name).mkdir(parents=True)
+            (self.target / name / "SKILL.md").write_text("legacy " + name, encoding="utf-8")
+
     def _snapshot(self, directory):
         return {str(path.relative_to(directory)): path.read_bytes()
                 for path in directory.rglob("*") if path.is_file()}
 
     def test_fresh_install_and_explicit_replacement(self):
         installer.install(self.root, self.target)
-        (self.target / "paper-sweep" / "old.txt").write_text("old")
+        (self.target / "research-radar" / "old.txt").write_text("old")
         with self.assertRaises(ValueError):
             installer.install(self.root, self.target)
-        self.assertTrue((self.target / "paper-sweep" / "old.txt").exists())
+        self.assertTrue((self.target / "research-radar" / "old.txt").exists())
         installer.install(self.root, self.target, replace=True)
-        self.assertFalse((self.target / "paper-sweep" / "old.txt").exists())
+        self.assertFalse((self.target / "research-radar" / "old.txt").exists())
         self.assertEqual(self._snapshot(self.target), self._snapshot(self.root))
         self.assertFalse(list(self.target.glob(".research-radar-install-*")))
 
-    def test_missing_second_source_preserves_both_old_skills(self):
-        self._previous()
+    def test_replace_retires_legacy_split_skills_and_refuses_without_replace(self):
+        self._previous_legacy()
         before = self._snapshot(self.target)
-        shutil.rmtree(self.root / "talent-scout")
+        with self.assertRaises(ValueError):
+            installer.install(self.root, self.target, replace=False)
+        self.assertEqual(self._snapshot(self.target), before)
+        installer.install(self.root, self.target, replace=True)
+        self.assertFalse(any((self.target / name).exists() for name in installer.LEGACY_NAMES))
+        self.assertEqual(self._snapshot(self.target), self._snapshot(self.root))
+
+    def test_missing_source_preserves_old_and_legacy_skills(self):
+        self._previous()
+        self._previous_legacy()
+        before = self._snapshot(self.target)
+        shutil.rmtree(self.root / "research-radar")
         with self.assertRaises(ValueError):
             installer.install(self.root, self.target, replace=True)
         self.assertEqual(self._snapshot(self.target), before)
 
-    def test_copy_failure_preserves_both_old_skills(self):
+    def test_copy_failure_preserves_old_and_legacy_skills(self):
         self._previous()
+        self._previous_legacy()
         before = self._snapshot(self.target)
-        original_copy = shutil.copytree
 
-        def fail_second(source, destination, *args, **kwargs):
-            if Path(source).name == "talent-scout":
-                raise OSError("simulated unreadable source")
-            return original_copy(source, destination, *args, **kwargs)
+        def fail_copy(source, destination, *args, **kwargs):
+            raise OSError("simulated unreadable source")
 
-        with mock.patch.object(installer.shutil, "copytree", side_effect=fail_second):
+        with mock.patch.object(installer.shutil, "copytree", side_effect=fail_copy):
             with self.assertRaises(OSError):
                 installer.install(self.root, self.target, replace=True)
         self.assertEqual(self._snapshot(self.target), before)
         self.assertFalse(list(self.target.glob(".research-radar-install-*")))
 
-    def test_second_commit_failure_rolls_back_both_old_skills(self):
+    def test_commit_failure_rolls_back_old_and_legacy_skills(self):
         self._previous()
+        self._previous_legacy()
         before = self._snapshot(self.target)
         original_rename = Path.rename
 
-        def fail_second(path, destination):
-            if path.parent.name == "incoming" and path.name == "talent-scout":
+        def fail_incoming(path, destination):
+            if path.parent.name == "incoming" and path.name == "research-radar":
                 raise OSError("simulated rename failure")
             return original_rename(path, destination)
 
-        with mock.patch.object(Path, "rename", fail_second):
+        with mock.patch.object(Path, "rename", fail_incoming):
             with self.assertRaises(OSError):
                 installer.install(self.root, self.target, replace=True)
         self.assertEqual(self._snapshot(self.target), before)
@@ -92,18 +107,19 @@ class InstallSkillsTests(unittest.TestCase):
     def test_fresh_install_commit_failure_removes_partial_installation(self):
         original_rename = Path.rename
 
-        def fail_second(path, destination):
-            if path.parent.name == "incoming" and path.name == "talent-scout":
+        def fail_incoming(path, destination):
+            if path.parent.name == "incoming" and path.name == "research-radar":
                 raise OSError("simulated rename failure")
             return original_rename(path, destination)
 
-        with mock.patch.object(Path, "rename", fail_second):
+        with mock.patch.object(Path, "rename", fail_incoming):
             with self.assertRaises(OSError):
                 installer.install(self.root, self.target)
         self.assertFalse(any((self.target / name).exists() for name in installer.NAMES))
 
     def test_interrupt_after_backup_rename_restores_original_files(self):
         self._previous()
+        self._previous_legacy()
         before = self._snapshot(self.target)
         original_rename = Path.rename
         interrupted = False
@@ -111,7 +127,7 @@ class InstallSkillsTests(unittest.TestCase):
         def interrupt_after_success(path, destination):
             nonlocal interrupted
             result = original_rename(path, destination)
-            if Path(destination).parent.name == "backups" and not interrupted:
+            if Path(destination).parent.name == "backups" and path.name == "research-radar" and not interrupted:
                 interrupted = True
                 raise KeyboardInterrupt("after successful backup rename")
             return result
@@ -124,6 +140,7 @@ class InstallSkillsTests(unittest.TestCase):
 
     def test_interrupt_after_install_rename_restores_original_files(self):
         self._previous()
+        self._previous_legacy()
         before = self._snapshot(self.target)
         original_rename = Path.rename
         interrupted = False
@@ -143,7 +160,7 @@ class InstallSkillsTests(unittest.TestCase):
         self.assertFalse(list(self.target.glob(".research-radar-install-*")))
 
     def test_destination_cannot_contain_entire_checkout(self):
-        nested_root = self.base / "danger" / "paper-sweep"
+        nested_root = self.base / "danger" / "research-radar"
         self._sources(nested_root)
         before = self._snapshot(nested_root)
         with self.assertRaises(ValueError):
@@ -152,7 +169,7 @@ class InstallSkillsTests(unittest.TestCase):
 
     def test_cross_skill_and_descendant_overlaps_are_rejected(self):
         before = self._snapshot(self.root)
-        for target in (self.root, self.root / "paper-sweep", self.root / "talent-scout" / "nested"):
+        for target in (self.root, self.root / "research-radar", self.root / "research-radar" / "nested"):
             with self.subTest(target=target):
                 with self.assertRaises(ValueError):
                     installer.install(self.root, target, replace=True)
@@ -163,15 +180,14 @@ class InstallSkillsTests(unittest.TestCase):
         unrelated = self.base / "unrelated"
         unrelated.mkdir()
         (unrelated / "important.txt").write_text("keep")
-        (self.target / "paper-sweep").symlink_to(unrelated, target_is_directory=True)
+        (self.target / "research-radar").symlink_to(unrelated, target_is_directory=True)
         with self.assertRaises(ValueError):
             installer.install(self.root, self.target, replace=True)
         self.assertEqual((unrelated / "important.txt").read_text(), "keep")
-        self.assertTrue((self.target / "paper-sweep").is_symlink())
+        self.assertTrue((self.target / "research-radar").is_symlink())
 
-    def test_non_directory_second_destination_does_not_modify_first(self):
+    def test_non_directory_legacy_destination_does_not_modify_target(self):
         self._previous()
-        shutil.rmtree(self.target / "talent-scout")
         (self.target / "talent-scout").write_text("keep file")
         before = self._snapshot(self.target)
         with self.assertRaises(ValueError):

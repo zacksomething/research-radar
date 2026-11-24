@@ -15,7 +15,7 @@ permissions:
 
 jobs:
   publish:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
     env:
@@ -49,7 +49,7 @@ jobs:
           assert match, 'CHANGELOG.md has no section for ' + version
           notes = match.group(1).strip() + (
               '\n\n### 安装与验证\n\n```bash\npython -m pip install %s\nresearch-radar doctor\n'
-              'research-radar demo --data-dir demo-%s\n```\n\n两个 skill 和安装脚本在 Source code 源码包中；'
+              'research-radar demo --data-dir demo-%s\n```\n\n统一 skill（research-radar）和安装脚本在 Source code 源码包中；'
               'wheel 提供 Python CLI 和默认配置。SHA256SUMS.txt 用于校验安装包。\n' % (wheel.name, tag))
           Path('dist/RELEASE_NOTES.md').write_text(notes, encoding='utf-8')
           PY

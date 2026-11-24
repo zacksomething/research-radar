@@ -380,6 +380,81 @@ class CollectionCliTests(unittest.TestCase):
         expected = dt.datetime.now(dt.timezone.utc).date() - dt.timedelta(days=1)
         self.assertEqual(c.build_parser().parse_args([]).date, expected)
 
+    def test_case_sensitive_cluster_and_benchmark_matching_prevent_false_positives(self):
+        bundled = c.load_config(c.DEFAULT_CONFIG)
+        act_verb = paper(id='arxiv:2609.19554', url='https://arxiv.org/abs/2609.19554v1',
+                         title='Spatial Intelligence',
+                         abstract='Models must act on visual observations and react quickly after behavior cloning on 10 math tasks.')
+        self.assertEqual(c.matching_clusters(act_verb, bundled['clusters']), ['Embodied-AI'])
+        _, signals = c.score_paper(act_verb, bundled['scoring'])
+        self.assertFalse(any('benchmark_mentioned' in s for s in signals))
+        self.assertFalse(any('baseline_mentioned' in s for s in signals))
+
+        real_acronyms = paper(id='arxiv:2609.19555', url='https://arxiv.org/abs/2609.19555v1',
+                              title='Evaluating ACT, ReAct and DreamerV3',
+                              abstract='Evaluated on BEHAVIOR-1K and MATH with 20 trials.')
+        clusters = c.matching_clusters(real_acronyms, bundled['clusters'])
+        self.assertIn('VLA', clusters)
+        self.assertIn('Agentic-AI', clusters)
+        self.assertIn('World-Models', clusters)
+        _, signals = c.score_paper(real_acronyms, bundled['scoring'])
+        self.assertTrue(any('BEHAVIOR' in s and 'MATH' in s for s in signals))
+        self.assertTrue(any('baseline_mentioned:ACT' in s for s in signals))
+
+    def test_prior_sota_abbreviation_promised_forms_and_empty_abstract_buzzwords(self):
+        _, signals = c.score_paper(paper(abstract='Our method achieves SOTA performance.'), {})
+        self.assertIn('sota_claim_without_numbers (-2)', signals)
+        for abstract in ('Code will be open-sourced at https://github.com/org/repo for 10 tasks.',
+                         'Weights will be published at https://huggingface.co/org/model for 10 tasks.'):
+            with self.subTest(abstract=abstract):
+                _, signals = c.score_paper(paper(abstract=abstract), {})
+                self.assertIn('code_release_promised (unverified)', signals)
+                self.assertFalse(any('code_available_claim' in s for s in signals))
+        _, signals = c.score_paper(paper(title='Novel Robust Effective Framework', abstract=''), {})
+        self.assertFalse(any('high_buzzword_density' in s for s in signals))
+        _, signals = c.score_paper(paper(abstract='A revolutionary method on 5 tasks.'),
+                                   {'hype_words': ['revolutionary', 'Revolutionary']})
+        self.assertEqual(sum(1 for s in signals if s.startswith('hype_term:')), 1)
+
+    def test_config_validation_rejects_booleans_reserved_clusters_and_bad_urls(self):
+        bad_configs = [
+            {'clusters': {'all': {'include': ['x']}}},
+            {'clusters': {'Unclassified': {'include': ['x']}}},
+            {'clusters': {'Topic': {'include': ['x'], 'include_case_sensitive': ['']}}},
+            {'clusters': {'Topic': {'include': ['x']}}, 'scoring': {'code_released': True}},
+            {'clusters': {'Topic': {'include': ['x']}}, 'scoring': {'hype_words': ['']}},
+            {'clusters': {'Topic': {'include': ['x']}}, 'sources': {'arxiv': {'base_url': 'ftp://bad.example/api'}}},
+            {'clusters': {'Topic': {'include': ['x']}}, 'sources': {'huggingface_daily': {'url': ''}}},
+        ]
+        for index, bad in enumerate(bad_configs):
+            path = self.root / ('bad-%d.json' % index)
+            path.write_text(json.dumps(bad), encoding='utf-8')
+            with self.subTest(index=index), self.assertRaises(ValueError):
+                c.load_config(path)
+
+    def test_html_arxiv_url_author_validation_hf_prefix_and_unclassified_view(self):
+        self.assertEqual(c.arxiv_id('https://arxiv.org/html/2609.20800v1'), '2609.20800')
+        self.assertEqual(c.arxiv_id('https://arxiv.org/pdf/2609.20800v2.PDF'), '2609.20800')
+        for bad_author in ('   ', {'name': '   '}, {'name': 123}):
+            with self.subTest(author=bad_author), self.assertRaises(ValueError):
+                paper(authors=[bad_author])
+        for bad_votes in (True, 1.5):
+            with self.subTest(votes=bad_votes), self.assertRaises(ValueError):
+                paper(hf_upvotes=bad_votes)
+        payload = [{'paper': {'id': ' arxiv:2609.00001v2 ', 'title': 'Line1\nLine2', 'summary': 'Abs1\n## Injected', 'authors': [{'name': 'A'}]}}]
+        client = Mock()
+        client.get.return_value = (json.dumps(payload).encode(), 1)
+        records, result = c.fetch_hf(CFG, dt.date(2026, 9, 18), dt.date(2026, 9, 18), client, 10)
+        self.assertEqual(result['status'], 'success')
+        self.assertEqual(records[0]['url'], 'https://arxiv.org/abs/2609.00001v2')
+        self.input.write_text(json.dumps([paper(id='external:u1', url='https://example.invalid/u1',
+                                                title='Line1\nLine2', abstract='Abs1\n## Heading 5')]))
+        code, summary = self.run_main(self.args + ['--cluster', 'Unclassified'])
+        self.assertEqual(code, 0)
+        report = Path(summary['paths']['report']).read_text(encoding='utf-8')
+        self.assertIn('## Unclassified (1 shown / 1 matched)', report)
+        self.assertNotIn('\n## Heading', report)
+        self.assertIn('### Line1 Line2', report)
 
 
 if __name__ == '__main__':

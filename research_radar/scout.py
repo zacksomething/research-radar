@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import socket
 import sys
 import tempfile
 import unicodedata
@@ -34,7 +35,7 @@ AUTHORSHIP_KINDS = {"paper_full_text", "paper_abstract", "author_homepage", "org
 TECHNICAL_KINDS = {"paper_full_text", "code", "independent_evaluation"}
 TEAM_KINDS = {"author_homepage", "organization", "company", "database", "news"}
 REACHABILITY_KINDS = {"author_homepage", "organization", "company"}
-RESERVED_TLDS = {"example", "invalid", "test", "localhost", "local"}
+RESERVED_TLDS = {"example", "invalid", "test", "localhost", "local", "internal", "home", "arpa", "lan"}
 RESERVED_DOMAINS = {"example.com", "example.net", "example.org"}
 SYNTHETIC_BANNER = "SYNTHETIC DEMO：合成数据，不是真实调查"
 GENERATED_PROFILE_MARKER = "自动生成；人工笔记请写在 Researchers/ 的其他路径。"
@@ -65,27 +66,52 @@ def _today():
     return dt.datetime.now(dt.timezone.utc).date()
 
 
+def _parse_iso_datetime(value):
+    raw = value[:-1] + "+00:00" if value.endswith(("Z", "z")) else value
+    return dt.datetime.fromisoformat(raw)
+
+
 def _parse_date(value):
-    return dt.datetime.fromisoformat(value.replace("Z", "+00:00")).date()
+    parsed = _parse_iso_datetime(value)
+    if parsed.tzinfo is not None:
+        parsed = parsed.astimezone(dt.timezone.utc)
+    return parsed.date()
 
 
 def normalized_name(value):
-    """Case, width, punctuation and token order do not distinguish one author name."""
-    text = unicodedata.normalize("NFKC", str(value or "")).casefold()
+    """Case, diacritics, width, punctuation and token order do not distinguish one author name."""
+    nfkd = unicodedata.normalize("NFKD", str(value or ""))
+    without_marks = "".join(ch for ch in nfkd if unicodedata.category(ch) != "Mn")
+    text = unicodedata.normalize("NFKC", without_marks).casefold()
     return " ".join(sorted(re.sub(r"[\W_]+", " ", text).split()))
 
 
 def reserved_host(host):
-    """Documentation, test, local and private hosts cannot back a real claim."""
+    """Documentation, test, local, single-label, non-canonical and private hosts cannot back a real claim."""
     host = (host or "").rstrip(".").lower()
-    if host.rsplit(".", 1)[-1] in RESERVED_TLDS:
+    if not host:
+        return True
+    bare = host.strip("[]")
+    try:
+        ip = ipaddress.ip_address(bare)
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped is not None:
+            return not ip.ipv4_mapped.is_global
+        return not ip.is_global
+    except ValueError:
+        pass
+    try:
+        socket.inet_aton(bare)
+        return True
+    except OSError:
+        pass
+    labels = host.split(".")
+    if len(labels) < 2 or any(not label for label in labels):
+        return True
+    if labels[-1] in RESERVED_TLDS:
         return True
     if any(host == d or host.endswith("." + d) for d in RESERVED_DOMAINS):
         return True
-    try:
-        return not ipaddress.ip_address(host.strip("[]")).is_global
-    except ValueError:
-        return False
+    return False
 
 
 def _read_json(path):
@@ -125,7 +151,8 @@ def new_candidate(paper, author_index=None):
     key = paper["id"] if author_index is None else "{}#author-{}".format(paper["id"], author_index)
     listed = None
     if author_index is not None:
-        listed = paper["authors"][author_index].get("name")
+        author = paper["authors"][author_index]
+        listed = author.get("name") if isinstance(author, dict) else (author if isinstance(author, str) else None)
     return {
         "id": _stable_id("candidate", key),
         "paper_id": paper["id"],
@@ -147,10 +174,11 @@ def new_candidate(paper, author_index=None):
     }
 
 
-def prepare(papers_path, output_path, limit=None, overwrite=False, per_author=False):
-    """Keep the complete source bundle; an explicit limit marks omitted papers.
+def prepare(papers_path, output_path, limit=None, overwrite=False, per_author=False, paper_ids=None, cluster=None):
+    """Keep the complete source bundle; explicit limit, cluster or paper_ids mark omitted papers.
 
     ``per_author`` creates one candidate per byline author so a team can be mapped.
+    ``paper_ids`` and ``cluster`` filter selected papers while recording every other paper as omitted.
     """
     source, destination = Path(papers_path), Path(output_path)
     same_file = source.resolve() == destination.resolve()
@@ -162,6 +190,11 @@ def prepare(papers_path, output_path, limit=None, overwrite=False, per_author=Fa
     if limit is not None:
         _require(isinstance(limit, int) and not isinstance(limit, bool) and limit > 0,
                  "limit must be a positive integer")
+    if paper_ids is not None:
+        _require(isinstance(paper_ids, (list, tuple)) and bool(paper_ids),
+                 "paper_ids must be a nonempty list of paper identifiers")
+    if cluster is not None:
+        cluster = _text(cluster, "cluster")
     bundle = _read_json(papers_path)
     _require(isinstance(bundle, dict) and bundle.get("schema_version") == 1,
              "papers schema_version must be 1")
@@ -169,14 +202,44 @@ def prepare(papers_path, output_path, limit=None, overwrite=False, per_author=Fa
     _text(bundle["run"].get("id"), "papers.run.id")
     papers = bundle.get("papers")
     _require(isinstance(papers, list), "papers must be an array")
-    seen = set()
+    papers_by_id = {}
     for paper in papers:
         _require(isinstance(paper, dict), "each paper must be an object")
         paper_id = _text(paper.get("id"), "paper.id")
-        _require(paper_id not in seen, "duplicate paper id: " + paper_id)
-        seen.add(paper_id)
+        _require(paper_id not in papers_by_id, "duplicate paper id: " + paper_id)
+        papers_by_id[paper_id] = paper
         _text(paper.get("title"), "paper.title")
-    selected = papers if limit is None else papers[:limit]
+    requested_ids = None
+    if paper_ids is not None:
+        requested_ids = []
+        for raw_id in paper_ids:
+            pid = _text(raw_id, "paper_id")
+            _require(pid in papers_by_id, "unknown paper_id: " + pid)
+            if pid not in requested_ids:
+                requested_ids.append(pid)
+        pool = [papers_by_id[pid] for pid in requested_ids]
+    else:
+        pool = list(papers)
+    if cluster is not None and cluster != "all":
+        if cluster == "Unclassified":
+            pool = [p for p in pool if not (p.get("clusters") or [])]
+        else:
+            pool = [p for p in pool if isinstance(p.get("clusters"), list) and cluster in p["clusters"]]
+        _require(bool(pool), "no papers in bundle match cluster: " + cluster)
+    selected = pool if limit is None else pool[:limit]
+    if requested_ids is not None or (cluster is not None and cluster != "all"):
+        parts = []
+        if requested_ids is not None:
+            parts.append("explicit_paper_ids")
+        if cluster is not None and cluster != "all":
+            parts.append("cluster=" + cluster)
+        if limit is not None:
+            parts.append("limit applied")
+        parts.append("omitted papers remain unreviewed")
+        method = "; ".join(parts)
+    else:
+        method = "input_order; explicit limit inherits upstream ordering (which may be prior-ranked); omitted papers remain unreviewed"
+    selected_ids = {p["id"] for p in selected}
     candidates = []
     for paper in selected:
         authors = paper.get("authors") if isinstance(paper.get("authors"), list) else []
@@ -185,6 +248,16 @@ def prepare(papers_path, output_path, limit=None, overwrite=False, per_author=Fa
         else:
             candidates.append(new_candidate(paper))
     today = _today().isoformat()
+    selection = {
+        "limit": limit, "total": len(papers), "selected": len(selected),
+        "mode": "per_author" if per_author else "paper", "candidates": len(candidates),
+        "omitted_paper_ids": [p["id"] for p in papers if p["id"] not in selected_ids],
+        "method": method,
+    }
+    if requested_ids is not None:
+        selection["paper_ids"] = requested_ids
+    if cluster is not None and cluster != "all":
+        selection["cluster"] = cluster
     review = {
         "schema_version": 1,
         "review_schema": REVIEW_SCHEMA,
@@ -192,10 +265,7 @@ def prepare(papers_path, output_path, limit=None, overwrite=False, per_author=Fa
         # Research cutoff. Advance it with `scout refresh` when research continues later.
         "as_of": today,
         "paper_bundle": bundle,
-        "selection": {"limit": limit, "total": len(papers), "selected": len(selected),
-                      "mode": "per_author" if per_author else "paper", "candidates": len(candidates),
-                      "omitted_paper_ids": [p["id"] for p in papers[len(selected):]],
-                      "method": "input_order; explicit limit inherits upstream ordering (which may be prior-ranked); omitted papers remain unreviewed"},
+        "selection": selection,
         "evidence": [],
         "candidates": candidates,
     }
@@ -215,7 +285,11 @@ def refresh(review_path, as_of=None):
     review = _load_review_for_update(review_path, REVIEW_SCHEMA)
     _date(review.get("as_of"), "review.as_of")
     current = _parse_date(review["as_of"])
-    target = _today() if as_of is None else _parse_date(_text(as_of, "as_of"))
+    if as_of is None:
+        target = _today()
+    else:
+        _date(as_of, "as_of")
+        target = _parse_date(as_of.strip())
     _require(current <= target <= _today(), "new as_of must be between the current cutoff {} and today".format(current))
     if target != current:
         review.setdefault("as_of_history", []).append(current.isoformat())
@@ -227,28 +301,43 @@ def refresh(review_path, as_of=None):
 def migrate(review_path):
     """Upgrade a v1 packet in place, keeping a byte-for-byte backup of the original."""
     path = Path(review_path)
+    _require(not path.is_symlink(), "Refusing to migrate a symlink review: " + str(path))
     raw = path.read_bytes()
-    review = _load_review_for_update(path, LEGACY_REVIEW_SCHEMA)
+    review = json.loads(raw.decode("utf-8"))
+    _require(isinstance(review, dict) and review.get("schema_version") == 1 and review.get("review_schema") == LEGACY_REVIEW_SCHEMA,
+             "expected review_schema " + LEGACY_REVIEW_SCHEMA)
     backup = path.with_name(path.name + ".v1-backup")
     _require(not backup.exists() and not backup.is_symlink(), "Backup already exists: {}; move it before migrating".format(backup))
     as_of = review.get("as_of") or review.get("paper_bundle", {}).get("run", {}).get("created_at")
     _date(as_of, "review.as_of (or paper_bundle.run.created_at)")
     as_of = _parse_date(as_of).isoformat()
+    candidates = review.get("candidates", [])
+    _require(isinstance(candidates, list) and all(isinstance(c, dict) for c in candidates),
+             "candidates must be an array of objects")
     review.update(review_schema=REVIEW_SCHEMA, as_of=as_of, prepared_at=review.get("prepared_at", as_of))
-    review.setdefault("selection", {}).setdefault("mode", "paper")
+    selection = review.setdefault("selection", {})
+    _require(isinstance(selection, dict), "selection must be an object")
+    selection.setdefault("mode", "paper")
+    selection.setdefault("candidates", len(candidates))
     reopened = []
-    for candidate in review.get("candidates", []):
+    for candidate in candidates:
         candidate.setdefault("author_index", None)
         if isinstance(candidate.get("person"), dict):
             candidate["person"].setdefault("listed_name", None)
         candidate.setdefault("open_questions", None)
+        notes = candidate.setdefault("notes", [])
+        _require(isinstance(notes, list) and all(isinstance(n, str) for n in notes),
+                 "candidate.notes must be a list of strings")
         if candidate.get("review_status") == "complete" and candidate["open_questions"] is None:
             # v1 never asked for remaining uncertainty; completion must be re-confirmed.
             candidate["review_status"] = "needs_review"
-            candidate.setdefault("notes", []).append(
+            notes.append(
                 "Migrated from v1: record open_questions, check v2 evidence rules, then mark complete again.")
             reopened.append(candidate.get("id"))
-    backup.write_bytes(raw)
+    with backup.open("xb") as stream:
+        stream.write(raw)
+        stream.flush()
+        os.fsync(stream.fileno())
     _write_json(path, review)
     return {"review": str(path), "backup": str(backup), "reopened_candidates": reopened}
 
@@ -293,9 +382,9 @@ def load_profile(path=None):
 def _date(value, label, nullable=False):
     if nullable and value is None:
         return
-    _text(value, label)
+    text = _text(value, label)
     try:
-        dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+        _parse_iso_datetime(text)
     except ValueError:
         raise ValueError(label + " must be an ISO date or timestamp")
 
@@ -308,8 +397,15 @@ def _evidence_index(review, as_of, synthetic=False):
         _require(isinstance(item, dict), "evidence item must be an object")
         eid = _text(item.get("id"), "evidence.id")
         _require(eid not in index, "duplicate evidence id: " + eid)
-        url = urlparse(_text(item.get("url"), "evidence.url"))
-        _require(url.scheme in {"http", "https"} and bool(url.netloc) and not url.username and not url.password,
+        raw_url = _text(item.get("url"), "evidence.url")
+        _require(not any(ch.isspace() or ord(ch) < 32 for ch in raw_url),
+                 "evidence.url must not contain whitespace or control characters")
+        url = urlparse(raw_url)
+        try:
+            _ = url.port
+        except ValueError:
+            raise ValueError("evidence.url has an invalid port")
+        _require(url.scheme in {"http", "https"} and bool(url.hostname) and not url.username and not url.password,
                  "evidence.url must be a public HTTP(S) URL without credentials")
         _require(synthetic or not reserved_host(url.hostname),
                  "Evidence {} uses a reserved, local or private host ({}); replace placeholder URLs with the source actually checked.".format(eid, url.hostname))
@@ -387,6 +483,16 @@ def assess_candidate(candidate, papers, evidence, profile, as_of=None):
     _require(isinstance(candidate, dict), "candidate must be an object")
     cid = _text(candidate.get("id"), "candidate.id")
     paper_id = _text(candidate.get("paper_id"), "candidate.paper_id")
+    try:
+        return _assess_candidate_inner(cid, paper_id, candidate, papers, evidence, profile, as_of=as_of)
+    except ValueError as exc:
+        prefix = "[candidate {} / {}] ".format(cid, paper_id)
+        if str(exc).startswith(prefix):
+            raise
+        raise ValueError(prefix + str(exc)) from exc
+
+
+def _assess_candidate_inner(cid, paper_id, candidate, papers, evidence, profile, as_of=None):
     _require(paper_id in papers, "candidate references an unknown paper: " + paper_id)
     authors = papers[paper_id].get("authors") if isinstance(papers[paper_id].get("authors"), list) else []
     author_index = candidate.get("author_index")
@@ -395,6 +501,9 @@ def assess_candidate(candidate, papers, evidence, profile, as_of=None):
              "candidate.author_index must be null or a position in the paper's author list")
     review_status = candidate.get("review_status")
     _require(review_status in {"needs_review", "complete"}, "invalid review_status")
+    notes = candidate.get("notes", [])
+    _require(isinstance(notes, list) and all(isinstance(n, str) for n in notes),
+             "candidate.notes must be a list of strings")
     triage = candidate.get("triage")
     _require(isinstance(triage, dict) and triage.get("status") in {"unknown", "reviewed"}, "invalid triage.status")
     if triage["status"] == "reviewed":
@@ -406,6 +515,9 @@ def assess_candidate(candidate, papers, evidence, profile, as_of=None):
     relation = _fact(candidate, "relationship", evidence)
     financing = _fact(candidate, "financing", evidence)
     visibility = _fact(candidate, "visibility", evidence)
+    listed_raw = person.get("listed_name")
+    _require(listed_raw is None or (isinstance(listed_raw, str) and bool(listed_raw.strip())),
+             "person.listed_name must be null or nonempty text")
     for field, value in (("person", person), ("company", company)):
         if value["status"] == "verified":
             entity_id = _text(value.get("id"), field + ".id")
@@ -413,19 +525,27 @@ def assess_candidate(candidate, papers, evidence, profile, as_of=None):
             _refs(value, field, evidence, required=True, entity=entity_id)
     if person["status"] == "verified":
         _text(person.get("role"), "person.role")
+        person_norm = normalized_name(person["name"])
+        _require(bool(person_norm), "person.name must contain letters or digits")
+        listed_norm = normalized_name(listed_raw) if listed_raw is not None else ""
         authorship = _refs(person, "person", evidence, required=True)
         _require(any(e["kind"] in AUTHORSHIP_KINDS and person["id"] in e["entity_ids"]
                      and paper_id in e["entity_ids"] for e in authorship),
                  "Verified person requires authorship evidence in person.evidence_ids binding both person.id and candidate.paper_id; use paper full text/abstract, an author homepage, or an organization page.")
         # IDs are chosen by the reviewer; the byline in the collected record is not.
-        names = [normalized_name(a.get("name")) for a in authors if isinstance(a, dict)]
         if author_index is not None:
-            listed = names[author_index]
-            _require(normalized_name(person["name"]) == listed
-                     or normalized_name(person.get("listed_name")) == listed,
+            author_entry = authors[author_index]
+            listed = normalized_name(author_entry.get("name") if isinstance(author_entry, dict) else author_entry)
+            _require(bool(listed) and (person_norm == listed or (bool(listed_norm) and listed_norm == listed)),
                      "person.name or person.listed_name must match author #{} of paper {}".format(author_index, paper_id))
         else:
-            _require(normalized_name(person["name"]) in names or normalized_name(person.get("listed_name")) in names,
+            valid_names = {
+                n for n in (
+                    normalized_name(a.get("name") if isinstance(a, dict) else a)
+                    for a in authors if isinstance(a, (dict, str))
+                ) if n
+            }
+            _require(person_norm in valid_names or (bool(listed_norm) and listed_norm in valid_names),
                      "Verified person {} is not in the author list of paper {}; set person.listed_name to the byline spelling when the names differ.".format(person["name"], paper_id))
     if relation["status"] == "verified":
         _require(person["status"] == "verified" and company["status"] == "verified",
@@ -453,8 +573,10 @@ def assess_candidate(candidate, papers, evidence, profile, as_of=None):
     if visibility["status"] == "verified":
         _require(visibility["value"] != "unknown", "verified visibility requires a value")
         _text(visibility.get("reason"), "visibility.reason")
-        _refs(visibility, "visibility", evidence, required=True,
-              entity=company.get("id") if company["status"] == "verified" else person.get("id"))
+        vis_entity = (company.get("id") if company["status"] == "verified"
+                      else (person.get("id") if person["status"] == "verified" else None))
+        _require(vis_entity is not None, "verified visibility requires a verified person or company")
+        _refs(visibility, "visibility", evidence, required=True, entity=vis_entity)
     else:
         _require(visibility["value"] == "unknown", "unverified visibility must use value unknown")
     assessment = candidate.get("assessment")
@@ -482,7 +604,9 @@ def assess_candidate(candidate, papers, evidence, profile, as_of=None):
                      "{} score requires {} evidence for the verified person; paper text alone is not enough".format(
                          name, "/".join(sorted(kinds))))
         elif name == "thesis_fit":
-            _require(any(paper_id in e["entity_ids"] or (company.get("id") and company["id"] in e["entity_ids"]) for e in refs),
+            _require(any(paper_id in e["entity_ids"]
+                         or (company["status"] == "verified" and company["id"] in e["entity_ids"])
+                         for e in refs),
                      "thesis_fit score requires paper or company evidence")
     if triage["status"] != "reviewed":
         missing.append("triage")
@@ -601,8 +725,36 @@ def _commit_render(artifacts, obsolete, data_dir):
                 print("scout: output publication status is unchanged; staging cleanup failed at {}: {}".format(staging, exc), file=sys.stderr)
 
 
-def render(review_path, data_dir, profile_path=None, top=10):
-    _require(isinstance(top, int) and not isinstance(top, bool) and top > 0, "top must be a positive integer")
+def _is_synthetic_run(run):
+    """Detect synthetic markers on the run or any upstream imported input_run."""
+    seen = set()
+    current = run
+    while isinstance(current, dict) and id(current) not in seen:
+        seen.add(id(current))
+        if current.get("synthetic_demo") is True:
+            return True
+        current = current.get("input_run")
+    return False
+
+
+def _format_labels(result):
+    candidate = result["candidate"]
+    person, company, relation, financing = [candidate[k] for k in ("person", "company", "relationship", "financing")]
+    stage_label = (financing["stage"] + " (" + financing["confidence"] + ")") if financing["status"] == "verified" else "unknown (" + financing["status"] + ")"
+    if financing["stage"] != "unknown" and result.get("effective_stage") == "unknown":
+        stage_label = "unknown; 已记录 " + financing["stage"] + " (" + financing["status"] + "; 未用于评分)"
+    company_label = ((company.get("name") or "未知") + " (" + company["status"] + ") / "
+                     + (relation.get("type") or relation["status"]))
+    person_name = person.get("name")
+    listed_name = person.get("listed_name")
+    if person_name and listed_name and normalized_name(listed_name) != normalized_name(person_name):
+        person_label = "{} (署名: {})".format(person_name, listed_name)
+    else:
+        person_label = person_name
+    return person_label, company_label, stage_label
+
+
+def _evaluate_review(review_path, profile_path=None):
     review = _read_json(review_path)
     _require(not (isinstance(review, dict) and review.get("review_schema") == LEGACY_REVIEW_SCHEMA),
              "This is a v1 review; run `research-radar scout migrate --review {}` first.".format(review_path))
@@ -625,7 +777,7 @@ def render(review_path, data_dir, profile_path=None, top=10):
         pid = _text(paper.get("id"), "paper.id")
         _require(pid not in papers, "duplicate paper id: " + pid)
         papers[pid] = paper
-    _require(synthetic or bundle["run"].get("synthetic_demo") is not True,
+    _require(synthetic or not _is_synthetic_run(bundle["run"]),
              "paper bundle is synthetic but the review is not marked synthetic_demo")
     evidence = _evidence_index(review, as_of, synthetic=synthetic)
     candidates = review.get("candidates")
@@ -646,47 +798,93 @@ def render(review_path, data_dir, profile_path=None, top=10):
     _require(selection.get("total") == len(papers) and selection.get("selected") == len({r["paper_id"] for r in results}),
              "selection counts do not match bundle")
     ranked = sorted((r for r in results if r["status"] == "scored"), key=lambda r: (-r["score"], r["candidate_id"]))
-    # Multiple papers about the same company/person yield one outreach suggestion.
-    unique, seen_entities = [], set()
+    # Multiple papers about the same company or person yield one outreach suggestion
+    # and prevent duplicate researcher dossiers from colliding on person.id.
+    unique, seen_companies, seen_people = [], set(), set()
     for result in ranked:
         candidate = result["candidate"]
+        person_id = candidate["person"]["id"]
         founder_link = (candidate["relationship"]["status"] == "verified"
                         and candidate["relationship"].get("type") in {"founder", "cofounder"})
-        entity = ("company", candidate["company"]["id"]) if founder_link else ("person", candidate["person"]["id"])
-        if entity in seen_entities:
+        company_id = candidate["company"]["id"] if founder_link else None
+        if person_id in seen_people or (company_id is not None and company_id in seen_companies):
             result["duplicate_entity"] = True
             continue
-        seen_entities.add(entity)
+        seen_people.add(person_id)
+        if company_id is not None:
+            seen_companies.add(company_id)
         unique.append(result)
-    selected = unique[:top]
     pending = [r for r in results if r["status"] == "needs_review"]
-    displayed = selected + pending[:max(0, top - len(selected))]
+    out_of_scope = [r for r in results if r["status"] == "out_of_scope"]
+    excluded_stage = [r for r in results if r["status"] == "excluded_stage"]
     overall_status = "needs_review" if pending or omitted else "complete"
     if bundle["run"].get("status") not in {"complete", "success", "ok"}:
         overall_status = "partial_source" if overall_status == "complete" else "needs_review_partial_source"
+    return {
+        "review": review, "synthetic": synthetic, "profile": profile, "bundle": bundle,
+        "run_id": run_id, "as_of": as_of, "papers": papers, "selection": selection,
+        "results": results, "ranked": ranked, "unique": unique, "pending": pending,
+        "omitted": omitted, "out_of_scope": out_of_scope, "excluded_stage": excluded_stage,
+        "overall_status": overall_status,
+    }
+
+
+def validate(review_path, profile_path=None):
+    """Dry-run validation of a review packet without writing any report files."""
+    state = _evaluate_review(review_path, profile_path=profile_path)
+    return {
+        "valid": True,
+        "review": str(review_path),
+        "run_id": state["run_id"],
+        "as_of": state["as_of"].isoformat(),
+        "synthetic_demo": state["synthetic"],
+        "status": state["overall_status"],
+        "counts": {
+            "scored_candidates": len(state["ranked"]),
+            "unique_entities": len(state["unique"]),
+            "pending_candidates": len(state["pending"]),
+            "omitted_unreviewed": len(state["omitted"]),
+            "out_of_scope": len(state["out_of_scope"]),
+            "excluded_stage": len(state["excluded_stage"]),
+            "duplicate_entities": len(state["ranked"]) - len(state["unique"]),
+        },
+    }
+
+
+def render(review_path, data_dir, profile_path=None, top=10):
+    _require(isinstance(top, int) and not isinstance(top, bool) and top > 0, "top must be a positive integer")
+    state = _evaluate_review(review_path, profile_path=profile_path)
+    review, synthetic, profile, bundle = state["review"], state["synthetic"], state["profile"], state["bundle"]
+    run_id, as_of, papers, selection = state["run_id"], state["as_of"], state["papers"], state["selection"]
+    results, ranked, unique, pending, omitted = state["results"], state["ranked"], state["unique"], state["pending"], state["omitted"]
+    out_of_scope, excluded_stage, overall_status = state["out_of_scope"], state["excluded_stage"], state["overall_status"]
+    duplicate_entities = len(ranked) - len(unique)
+    selected = unique[:top]
+    displayed = selected + pending[:max(0, top - len(selected))]
     target = Path(data_dir) / "Research"
     target.mkdir(parents=True, exist_ok=True)
     stem = "团队雷达_" + run_id
     report_path = target / (stem + ".md")
     audit_path = target / (stem + ".evidence.json")
     rows = ["# 团队雷达 {} · {} · 已评分 {} · 待审候选 {} · 未选论文 {}\n".format(
-                run_id, overall_status, len(unique), len(pending), len(omitted)),
-            "| # | 论文 | 研究者 | 机构 | 公司/关系 | 阶段(置信) | 推送分 | 状态 |",
-            "| --- | --- | --- | --- | --- | --- | --- | --- |"]
+                run_id, overall_status, len(unique), len(pending), len(omitted))]
+    if synthetic:
+        rows.append("> " + SYNTHETIC_BANNER + "\n")
+    rows.append("- 研究截止日: `{}` · 来源状态: `{}` · 阶段排除: {} · 范围外: {} · 重复实体合并: {}\n".format(
+        as_of.isoformat(), _md(bundle["run"].get("status", "unknown")),
+        len(excluded_stage), len(out_of_scope), duplicate_entities))
+    rows.extend([
+        "| # | 论文 | 研究者 | 机构 | 公司/关系 | 阶段(置信) | 推送分 | 状态 |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+    ])
     for index, result in enumerate(displayed, 1):
         candidate, paper = result["candidate"], papers[result["paper_id"]]
-        person, company, relation, financing = [candidate[k] for k in ("person", "company", "relationship", "financing")]
-        stage_label = (financing["stage"] + " (" + financing["confidence"] + ")") if financing["status"] == "verified" else "unknown (" + financing["status"] + ")"
-        if financing["stage"] != "unknown" and result.get("effective_stage") == "unknown":
-            stage_label = "unknown; 已记录 " + financing["stage"] + " (" + financing["status"] + "; 未用于评分)"
-        company_label = ((company.get("name") or "未知") + " (" + company["status"] + ") / "
-                         + (relation.get("type") or relation["status"]))
+        person = candidate["person"]
+        person_label, company_label, stage_label = _format_labels(result)
         rows.append("| {} | {} | {} | {} | {} | {} | {} | {} |".format(
             index, _link(paper.get("title", result["paper_id"]), paper.get("url")),
-            _md(person.get("name")), _md(person.get("affiliation")), _md(company_label),
+            _md(person_label), _md(person.get("affiliation")), _md(company_label),
             _md(stage_label), "—" if result["score"] is None else "{:.2f}".format(result["score"]), result["status"]))
-    if synthetic:
-        rows.insert(1, "> " + SYNTHETIC_BANNER + "\n")
     if not displayed:
         rows.append("| — | 无可展示候选 | — | — | — | — | — | {} |".format(overall_status))
     audit = {"schema_version": 1, "review_schema": REVIEW_SCHEMA, "run": bundle["run"],
@@ -695,7 +893,8 @@ def render(review_path, data_dir, profile_path=None, top=10):
              "status": overall_status, "profile": profile, "selection": selection,
              "counts": {"scored_candidates": len(ranked), "unique_entities": len(unique),
                         "pending_candidates": len(pending), "omitted_unreviewed": len(omitted),
-                        "displayed_scored": len(selected)},
+                        "out_of_scope": len(out_of_scope), "excluded_stage": len(excluded_stage),
+                        "duplicate_entities": duplicate_entities, "displayed_scored": len(selected)},
              "evidence": review["evidence"], "results": results,
              "limitations": "Validation checks references and entity consistency, not whether cited pages substantiate human/model claims."}
     profile_paths = []
@@ -704,11 +903,31 @@ def render(review_path, data_dir, profile_path=None, top=10):
     artifacts = {report_path: "\n".join(rows) + "\n"}
     for result in selected[:3]:
         person = result["candidate"]["person"]
+        _, company_label, stage_label = _format_labels(result)
+        comp = result["components"]
+        dims = comp["scores_0_to_5"]
         path = generated / (_stable_id("person", person["id"]) + ".md")
-        artifacts[path] = "# {}\n\n自动生成；人工笔记请写在 Researchers/ 的其他路径。\n\n- Stable ID: {}\n- 角色: {}\n- 机构: {}\n- 推送分: {:.2f}\n- 证据与分项: [审核记录](../../../Research/{})\n- 来源论文: {}\n- 未决问题: {}\n".format(
-            _md(person["name"]), _md(person["id"]), _md(person["role"]), _md(person.get("affiliation")), result["score"],
-            audit_path.name, _link(papers[result["paper_id"]].get("title"), papers[result["paper_id"]].get("url")),
-            "；".join(_md(q) for q in result["candidate"]["open_questions"]) or "已记录为无")
+        lines = ["# {}".format(_md(person["name"])), ""]
+        if synthetic:
+            lines.extend(["> " + SYNTHETIC_BANNER, ""])
+        lines.extend([GENERATED_PROFILE_MARKER, ""])
+        lines.append("- Stable ID: {}".format(_md(person["id"])))
+        if person.get("listed_name") and normalized_name(person["listed_name"]) != normalized_name(person["name"]):
+            lines.append("- 论文署名: {}".format(_md(person["listed_name"])))
+        lines.extend([
+            "- 角色: {}".format(_md(person["role"])),
+            "- 机构: {}".format(_md(person.get("affiliation"))),
+            "- 公司/关系: {}".format(_md(company_label)),
+            "- 融资阶段: {}".format(_md(stage_label)),
+            "- 研究截止日: `{}`".format(as_of.isoformat()),
+            "- 推送分: {:.2f}（技术 {:g} / 团队 {:g} / 策略匹配 {:g} / 联系可达性 {:g}；阶段系数 {:g}；可见度加成 {:+.0%}）".format(
+                result["score"], dims["technical"], dims["team"], dims["thesis_fit"], dims["reachability"],
+                comp["stage_multiplier"], comp["visibility_bonus"]),
+            "- 证据与分项: [审核记录](../../../Research/{})".format(audit_path.name),
+            "- 来源论文: {}".format(_link(papers[result["paper_id"]].get("title"), papers[result["paper_id"]].get("url"))),
+            "- 未决问题: {}".format("；".join(_md(q) for q in result["candidate"]["open_questions"]) or "已记录为无"),
+        ])
+        artifacts[path] = "\n".join(lines) + "\n"
         profile_paths.append(str(path))
     obsolete = []
     previous_person_files = set()
@@ -740,8 +959,8 @@ def render(review_path, data_dir, profile_path=None, top=10):
             "pending_candidates": len(pending), "omitted_papers": len(omitted)}
 
 
-def main(argv=None):
-    parser = argparse.ArgumentParser(description=__doc__)
+def main(argv=None, prog=None):
+    parser = argparse.ArgumentParser(prog=prog, description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     prepare_parser = commands.add_parser("prepare", help="Create an unfilled review package for host research")
     prepare_parser.add_argument("--papers", required=True)
@@ -749,20 +968,27 @@ def main(argv=None):
     prepare_parser.add_argument("--limit", type=int)
     prepare_parser.add_argument("--overwrite", action="store_true", help="Explicitly reset an existing review output")
     prepare_parser.add_argument("--per-author", action="store_true", help="One candidate per byline author instead of per paper")
+    prepare_parser.add_argument("--paper-id", action="append", dest="paper_ids",
+                                help="Select specific paper ID(s) to prepare (repeatable); unselected papers are listed in selection.omitted_paper_ids")
+    prepare_parser.add_argument("--cluster", help="Select papers matching a topic cluster (or Unclassified); unselected papers are listed in selection.omitted_paper_ids")
     refresh_parser = commands.add_parser("refresh", help="Advance a review's research cutoff (as_of) before adding newer evidence")
     refresh_parser.add_argument("--review", required=True)
     refresh_parser.add_argument("--as-of", help="YYYY-MM-DD; default today (UTC)")
     migrate_parser = commands.add_parser("migrate", help="Upgrade a v1 review in place and keep a .v1-backup copy")
     migrate_parser.add_argument("--review", required=True)
+    validate_parser = commands.add_parser("validate", help="Dry-run validate a review package without writing report files")
+    validate_parser.add_argument("--review", required=True)
+    validate_parser.add_argument("--profile", "--rubric", dest="profile")
     render_parser = commands.add_parser("render", help="Validate and render a host-researched review package")
     render_parser.add_argument("--review", required=True)
     render_parser.add_argument("--data-dir", default="data")
-    render_parser.add_argument("--profile")
+    render_parser.add_argument("--profile", "--rubric", dest="profile")
     render_parser.add_argument("--top", type=int, default=10)
     args = parser.parse_args(argv)
     try:
         if args.command == "prepare":
-            review = prepare(args.papers, args.out, args.limit, overwrite=args.overwrite, per_author=args.per_author)
+            review = prepare(args.papers, args.out, args.limit, overwrite=args.overwrite,
+                             per_author=args.per_author, paper_ids=args.paper_ids, cluster=args.cluster)
             print(json.dumps({"review": str(args.out), "selected": review["selection"]["selected"],
                               "candidates": len(review["candidates"]),
                               "unreviewed_omitted": len(review["selection"]["omitted_paper_ids"])}, ensure_ascii=False))
@@ -770,6 +996,8 @@ def main(argv=None):
             print(json.dumps(refresh(args.review, args.as_of), ensure_ascii=False))
         elif args.command == "migrate":
             print(json.dumps(migrate(args.review), ensure_ascii=False))
+        elif args.command == "validate":
+            print(json.dumps(validate(args.review, args.profile), ensure_ascii=False))
         else:
             print(json.dumps(render(args.review, args.data_dir, args.profile, args.top), ensure_ascii=False))
         return 0

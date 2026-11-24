@@ -3,6 +3,7 @@
   "run": {
     "id": "synthetic-fixture-v1",
     "status": "complete",
+    "synthetic_demo": true,
     "window": {"start": "2026-01-01", "end": "2026-01-01"},
     "sources": ["synthetic"],
     "disclaimer": "SYNTHETIC OFFLINE DEMO. Every paper, researcher, institution, company, claim, and URL is fictional. This is not a live research result."

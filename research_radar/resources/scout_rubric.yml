@@ -32,6 +32,9 @@ visibility_bonus:
   low: 0.20
   medium: 0.10
   high: 0.0
+# Dated financing evidence older than this window (relative to review.as_of) is
+# retained in the audit but treated as unknown for scoring/exclusion.
+financing_max_age_days: 365
 # score = round(min(10, 10 * weighted_mean(scores / 5)
 #                   * effective_stage_multiplier * (1 + visibility_bonus)), 2)
 # Unknown/unattributable/low-confidence financing uses unknown, never early-stage.

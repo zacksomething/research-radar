@@ -84,7 +84,7 @@
     "total": 2,
     "selected": 2,
     "omitted_paper_ids": [],
-    "method": "source_order; no prior threshold or ranking",
+    "method": "input_order; explicit limit inherits upstream ordering (which may be prior-ranked); omitted papers remain unreviewed",
     "mode": "paper",
     "candidates": 2
   },

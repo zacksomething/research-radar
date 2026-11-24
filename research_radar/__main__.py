@@ -20,7 +20,7 @@ def _parser():
     commands.add_parser("scout", help="Prepare or render a human-reviewed scouting report")
     doctor = commands.add_parser("doctor", help="Check local dependencies and configuration; no network or secrets")
     doctor.add_argument("--config", type=Path, help="Override the bundled paper-cluster configuration")
-    doctor.add_argument("--rubric", type=Path, help="Override the bundled scouting rubric")
+    doctor.add_argument("--rubric", "--profile", dest="rubric", type=Path, help="Override the bundled scouting rubric")
     doctor.add_argument("--json", action="store_true", help="Emit machine-readable diagnostics")
     demo = commands.add_parser("demo", help="Run an explicitly synthetic, entirely offline workflow")
     demo.add_argument("--data-dir", type=Path, default=Path("demo-data"), help="Local output directory (default: demo-data)")
@@ -68,9 +68,9 @@ def doctor(args):
         record(module, available, "Module available" if available else "Package module is missing")
     successful = all(item["status"] == "ok" for item in checks)
     if args.json:
-        print(json.dumps({"status": "ok" if successful else "error", "checks": checks}, ensure_ascii=False, indent=2))
+        print(json.dumps({"version": __version__, "status": "ok" if successful else "error", "checks": checks}, ensure_ascii=False, indent=2))
     else:
-        print("Research Radar local checks (no network access; no credentials inspected)")
+        print("Research Radar {} local checks (no network access; no credentials inspected)".format(__version__))
         for check in checks:
             print("[{status}] {name}: {detail}".format(**check))
     return 0 if successful else 1
@@ -81,11 +81,11 @@ def main(argv=None):
     if argv and argv[0] == "sweep":
         from . import collection
 
-        return collection.main(argv[1:])
+        return collection.main(argv[1:], prog="research-radar sweep")
     if argv and argv[0] == "scout":
         from . import scout
 
-        return scout.main(argv[1:])
+        return scout.main(argv[1:], prog="research-radar scout")
     parser = _parser()
     args = parser.parse_args(argv)
     if args.command == "doctor":

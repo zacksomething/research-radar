@@ -10,6 +10,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from research_radar import __version__
 from research_radar.__main__ import main
 from research_radar.demo import fill_synthetic_review
 
@@ -30,7 +31,7 @@ class CommandLineTests(unittest.TestCase):
             text=True,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(result.stdout.strip(), "0.2.0")
+        self.assertEqual(result.stdout.strip(), __version__)
 
     def test_doctor_checks_bundled_configs_offline(self):
         output = io.StringIO()
@@ -166,8 +167,8 @@ class CommandLineTests(unittest.TestCase):
 
     def test_skill_config_copies_match_packaged_defaults(self):
         root = Path(__file__).resolve().parents[1]
-        for copy, bundled in (("paper-sweep/clusters.yml", "clusters.yml"),
-                              ("talent-scout/scout_rubric.yml", "scout_rubric.yml")):
+        for copy, bundled in (("research-radar/resources/clusters.yml", "clusters.yml"),
+                              ("research-radar/resources/scout_rubric.yml", "scout_rubric.yml")):
             with self.subTest(copy=copy):
                 self.assertEqual((root / copy).read_bytes(),
                                  (root / "research_radar" / "resources" / bundled).read_bytes())
@@ -181,6 +182,35 @@ class CommandLineTests(unittest.TestCase):
                     status = main(["scout", "render", "--review", str(review), "--data-dir", directory, "--top", "2"])
             self.assertEqual(status, 0, output.getvalue())
             self.assertEqual(json.loads(output.getvalue())["scored"], 2)
+
+    def test_doctor_profile_alias_version_and_subcommand_help_prog(self):
+        root = Path(__file__).resolve().parents[1]
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            status = main(["doctor", "--profile", str(root / "research-radar" / "resources" / "scout_rubric.yml"), "--json"])
+        report = json.loads(output.getvalue())
+        self.assertEqual(status, 0, report)
+        self.assertEqual(report["version"], __version__)
+        for subcommand in ("sweep", "scout"):
+            result = subprocess.run(
+                [sys.executable, "-m", "research_radar", subcommand, "--help"],
+                check=False, capture_output=True, text=True,
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("research-radar " + subcommand, result.stdout)
+
+    def test_unified_skill_frontmatter_and_legacy_dirs_removed(self):
+        import yaml
+        root = Path(__file__).resolve().parents[1]
+        self.assertFalse((root / "paper-sweep").exists())
+        self.assertFalse((root / "talent-scout").exists())
+        skill_md = root / "research-radar" / "SKILL.md"
+        self.assertTrue(skill_md.is_file())
+        parts = skill_md.read_text(encoding="utf-8").split("---", 2)
+        self.assertEqual(len(parts), 3)
+        meta = yaml.safe_load(parts[1])
+        self.assertEqual(meta["name"], "research-radar")
+        self.assertTrue((root / "research-radar" / "references" / "research-protocol.md").is_file())
 
 
 if __name__ == "__main__":

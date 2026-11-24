@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.3.0 — 2026-11-24
+
+- 原有的 `paper-sweep` 和 `talent-scout` 合并为 `research-radar`。论文检索可以单独运行，团队调查可直接沿用已有论文包。
+- `scout prepare` 支持按 `--cluster` 或可重复的 `--paper-id` 选择论文，再用 `--per-author` 展开署名作者。评审包保留未选论文的 ID。`sweep --cluster Unclassified` 可单独查看未分类论文。
+- 新增只读命令 `scout validate --review <file>`。它与报告生成使用相同的校验逻辑，并列出已评分、待调查和未选记录的数量。
+- 证据校验按 UTC 比较带时区的日期，拒绝用单标签内网主机名作为公开来源。报告同时标明已记录但未参与评分的融资阶段，方便追溯评分依据。
+
+### 从 0.2.0 升级
+
+- 使用两个旧 skill 的用户可先备份自行修改过的配置，再从新版源码运行 `python scripts/install_skills.py --target <宿主的 skills 目录> --replace`。安装器会移除目标目录中的两个旧 skill，并安装统一入口。
+- 已有 v2 评审包可直接运行 `scout validate`。若使用公司证据支持策略匹配评分，先核实该公司。已核实的可见度也需要对应到已核实的人物或公司。
+
 ## 0.2.0 — 2026-10-09
 
 本版修复对抗性审查中复现的证据绕过，并允许按作者调查整个团队。评审格式升级为 `research-radar-scout/v2`。

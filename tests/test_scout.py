@@ -640,6 +640,191 @@ class ScoutTests(unittest.TestCase):
     def test_main_returns_nonzero_for_missing_review(self):
         self.assertEqual(scout.main(["render", "--review", str(self.root / "missing.json")]), 2)
 
+    def test_reserved_host_rejects_empty_single_label_and_noncanonical_ips(self):
+        for url in (
+            "http://:80/x",
+            "http://intranet/doc",
+            "http://metadata.internal/x",
+            "http://127.1/x",
+            "http://2130706433/x",
+            "http://0x7f000001/x",
+            "http://0177.0.0.1/x",
+            "http://[::ffff:127.0.0.1]/x",
+            "https://arxiv.org/abs/2609.00001 bad",
+            "https://arxiv.org:99999/abs/2609.00001",
+        ):
+            review = self.prepared()
+            complete_candidate(review)
+            review["evidence"][0]["url"] = url
+            with self.subTest(url=url), self.assertRaises(ValueError):
+                self.rendered(review)
+
+    def test_diacritics_match_and_empty_byline_cannot_bypass_name_check(self):
+        self.bundle["papers"][0]["authors"] = [{"name": "José García", "affiliations": []}, {"name": "---", "affiliations": []}]
+        self.save(self.papers, self.bundle)
+        review = self.prepared()
+        candidate = complete_candidate(review)
+        candidate["person"]["name"] = "Jose Garcia"
+        _, audit = self.rendered(review)
+        self.assertEqual(audit["results"][0]["status"], "scored")
+
+        candidate["person"]["name"] = "Arbitrary Outsider"
+        candidate["person"]["listed_name"] = None
+        with self.assertRaisesRegex(ValueError, "not in the author list"):
+            self.rendered(review)
+
+    def test_listed_name_mismatch_is_surfaced_in_report_and_dossier(self):
+        review = self.prepared()
+        candidate = complete_candidate(review)
+        candidate["person"]["name"] = "Public Alias Name"
+        candidate["person"]["listed_name"] = "Synthetic Researcher"
+        result, _ = self.rendered(review)
+        report_text = Path(result["report"]).read_text(encoding="utf-8")
+        dossier_text = Path(result["profiles"][0]).read_text(encoding="utf-8")
+        self.assertIn("Public Alias Name (署名: Synthetic Researcher)", report_text)
+        self.assertIn("论文署名: Synthetic Researcher", dossier_text)
+        self.assertIn("研究截止日: `2026-09-19`", dossier_text)
+
+    def test_timezone_aware_checked_at_normalizes_to_utc(self):
+        review = self.prepared()
+        complete_candidate(review)
+        review["evidence"][0]["checked_at"] = "2026-09-20T01:00:00+08:00"
+        _, audit = self.rendered(review)
+        self.assertEqual(audit["results"][0]["status"], "scored")
+        review["evidence"][0]["checked_at"] = "2026-09-20T09:00:00+08:00"
+        with self.assertRaisesRegex(ValueError, "checked_at is after review.as_of"):
+            self.rendered(review)
+
+    def test_verified_visibility_unverified_thesis_company_and_notes_validation(self):
+        review = self.prepared()
+        candidate = complete_candidate(review)
+        candidate["person"].update(status="unknown", id=None, name=None, role=None, evidence_ids=[])
+        candidate["assessment"]["team"]["score"] = None
+        candidate["assessment"]["reachability"]["score"] = None
+        candidate["visibility"].update(status="verified", value="low", reason="Checked", evidence_ids=["paper"])
+        with self.assertRaisesRegex(ValueError, "verified person or company"):
+            self.rendered(review)
+
+        review = self.prepared()
+        candidate = complete_candidate(review)
+        candidate["company"]["id"] = "unverified:co"
+        review["evidence"].append({
+            "id": "co-only", "url": "https://fixture-host.net/co", "checked_at": "2026-09-19",
+            "source_date": None, "kind": "company", "entity_ids": ["unverified:co"], "note": "Unverified company page",
+        })
+        candidate["assessment"]["thesis_fit"]["evidence_ids"] = ["co-only"]
+        with self.assertRaisesRegex(ValueError, "thesis_fit score requires"):
+            self.rendered(review)
+
+        review = self.prepared()
+        candidate = complete_candidate(review)
+        candidate["notes"] = "not-a-list"
+        with self.assertRaisesRegex(ValueError, "candidate.notes"):
+            self.rendered(review)
+
+    def test_nested_synthetic_input_run_is_rejected_without_synthetic_flag(self):
+        review = self.prepared()
+        complete_candidate(review)
+        review["paper_bundle"]["run"]["input_run"] = {"id": "upstream-synth", "synthetic_demo": True}
+        with self.assertRaisesRegex(ValueError, "synthetic"):
+            self.rendered(review)
+
+    def test_duplicate_person_across_papers_does_not_overwrite_dossier_or_duplicate_profiles(self):
+        second_paper = copy.deepcopy(self.bundle["papers"][0])
+        second_paper["id"] = "arxiv:synthetic-002"
+        self.bundle["papers"].append(second_paper)
+        self.save(self.papers, self.bundle)
+        review = self.prepared()
+        first = complete_candidate(review, known_company=True, stage="seed")
+        second = review["candidates"][1]
+        second["review_status"] = "complete"
+        second["open_questions"] = []
+        second["triage"] = {"status": "reviewed", "relevant": True, "abstract_score": 3, "reason": "Relevant"}
+        second["person"] = {"id": first["person"]["id"], "name": "Synthetic Researcher", "status": "verified",
+                            "role": "author", "affiliation": "Synthetic Lab", "evidence_ids": ["person-2"]}
+        review["evidence"].extend([
+            {"id": "paper-2", "url": "https://fixture-host.net/paper2.pdf", "checked_at": "2026-09-19",
+             "source_date": None, "kind": "paper_full_text", "entity_ids": [second["paper_id"]], "note": "Paper 2"},
+            {"id": "person-2", "url": "https://fixture-host.net/researcher", "checked_at": "2026-09-19",
+             "source_date": "2026-09-18", "kind": "author_homepage", "entity_ids": [first["person"]["id"], second["paper_id"]],
+             "note": "Authorship 2"},
+        ])
+        for name, item in second["assessment"].items():
+            item.update(score=4, reason="Scored", evidence_ids=["person-2" if name in {"team", "reachability"} else "paper-2"])
+        second["assessment"]["technical"]["scope"] = "full_text"
+        result, audit = self.rendered(review)
+        self.assertEqual(result["scored"], 1)
+        self.assertEqual(len(result["profiles"]), 1)
+        self.assertEqual(audit["counts"]["duplicate_entities"], 1)
+
+    def test_validate_dry_run_and_candidate_error_prefix_and_prepare_paper_id(self):
+        second_paper = copy.deepcopy(self.bundle["papers"][0])
+        second_paper["id"] = "arxiv:synthetic-002"
+        second_paper["authors"] = [{"name": "Alice", "affiliations": []}, {"name": "Bob", "affiliations": []}, {"name": "Carol", "affiliations": []}]
+        self.bundle["papers"].append(second_paper)
+        self.save(self.papers, self.bundle)
+
+        with self.assertRaisesRegex(ValueError, "unknown paper_id"):
+            scout.prepare(self.papers, self.review_path, paper_ids=["arxiv:missing"], overwrite=True)
+
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            code = scout.main(["prepare", "--papers", str(self.papers), "--out", str(self.review_path),
+                               "--paper-id", "arxiv:synthetic-002", "--per-author", "--overwrite"])
+        self.assertEqual(code, 0)
+        summary = json.loads(out.getvalue())
+        self.assertEqual(summary["selected"], 1)
+        self.assertEqual(summary["candidates"], 3)
+        self.assertEqual(summary["unreviewed_omitted"], 1)
+
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            code = scout.main(["validate", "--review", str(self.review_path)])
+        self.assertEqual(code, 0)
+        validated = json.loads(out.getvalue())
+        self.assertTrue(validated["valid"])
+        self.assertEqual(validated["counts"]["pending_candidates"], 3)
+        self.assertEqual(validated["counts"]["omitted_unreviewed"], 1)
+        self.assertFalse((self.root / "data").exists())
+
+        review = json.loads(self.review_path.read_text(encoding="utf-8"))
+        review["candidates"][1]["review_status"] = "complete"
+        self.save(self.review_path, review)
+        with self.assertRaisesRegex(ValueError, r"\[candidate candidate-[a-f0-9]+ / arxiv:synthetic-002\].*open_questions"):
+            scout.validate(self.review_path)
+
+    def test_synthetic_dossiers_carry_synthetic_banner(self):
+        root = Path(__file__).resolve().parents[1]
+        result = scout.render(root / "examples" / "synthetic_review.json", self.root / "demo")
+        for profile_path in result["profiles"]:
+            self.assertIn(scout.SYNTHETIC_BANNER, Path(profile_path).read_text(encoding="utf-8"))
+
+    def test_prepare_cluster_filter_and_rubric_flag_alias(self):
+        unclassified = copy.deepcopy(self.bundle["papers"][0])
+        unclassified["id"] = "arxiv:synthetic-unclassified"
+        unclassified["clusters"] = []
+        unclassified["primary_cluster"] = None
+        self.bundle["papers"].append(unclassified)
+        self.save(self.papers, self.bundle)
+
+        with self.assertRaisesRegex(ValueError, "no papers in bundle match cluster"):
+            scout.prepare(self.papers, self.review_path, cluster="Nonexistent", overwrite=True)
+
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            code = scout.main(["prepare", "--papers", str(self.papers), "--out", str(self.review_path),
+                               "--cluster", "Unclassified", "--overwrite"])
+        self.assertEqual(code, 0)
+        summary = json.loads(out.getvalue())
+        self.assertEqual(summary["selected"], 1)
+        self.assertEqual(summary["unreviewed_omitted"], 1)
+        review = json.loads(self.review_path.read_text(encoding="utf-8"))
+        self.assertEqual(review["selection"]["cluster"], "Unclassified")
+        self.assertEqual(review["candidates"][0]["paper_id"], "arxiv:synthetic-unclassified")
+
+        root = Path(__file__).resolve().parents[1]
+        rubric = str(root / "research-radar" / "resources" / "scout_rubric.yml")
+        with contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(scout.main(["validate", "--review", str(self.review_path), "--rubric", rubric]), 0)
+        self.assertTrue(json.loads(out.getvalue())["valid"])
+
 
 if __name__ == "__main__":
     unittest.main()

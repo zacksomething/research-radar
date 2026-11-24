@@ -17,6 +17,8 @@ import uuid
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+from . import __version__
+
 SCHEMA_VERSION = 1
 DEFAULT_CONFIG = Path(__file__).parent / 'resources' / 'clusters.yml'
 ATOM = '{http://www.w3.org/2005/Atom}'
@@ -24,6 +26,8 @@ ARXIV = '{http://arxiv.org/schemas/atom}'
 OPENSEARCH = '{http://a9.com/-/spec/opensearch/1.1/}'
 ARXIV_PATTERN = re.compile(r'((?:\d{4}\.\d{4,5}|[a-z][a-z.-]*/\d{7}))(?:v([1-9]\d*))?', re.I)
 ARXIV_HOSTS = {'arxiv.org', 'www.arxiv.org', 'export.arxiv.org'}
+RESERVED_CLUSTER_NAMES = {'all', 'unclassified'}
+CASE_SENSITIVE_BENCHMARKS = {'BEHAVIOR', 'MATH', 'CALVIN', 'DROID'}
 
 
 def utc_yesterday():
@@ -67,9 +71,11 @@ def load_config(path):
     if not isinstance(cfg, dict) or not isinstance(cfg.get('clusters'), dict):
         raise ValueError('Configuration must contain a clusters mapping.')
     for name, definition in cfg['clusters'].items():
-        if not isinstance(name, str) or not isinstance(definition, dict):
-            raise ValueError('Every cluster needs a string name and a mapping.')
-        for field in ('include', 'exclude'):
+        if not isinstance(name, str) or not name.strip() or not isinstance(definition, dict):
+            raise ValueError('Every cluster needs a nonempty string name and a mapping.')
+        if name.strip().lower() in RESERVED_CLUSTER_NAMES:
+            raise ValueError('Cluster name %r is reserved.' % name)
+        for field in ('include', 'include_case_sensitive', 'exclude'):
             values = definition.get(field, []) or []
             if not isinstance(values, list) or not all(isinstance(v, str) and v.strip() for v in values):
                 raise ValueError('Cluster %s.%s must be a list of nonempty strings.' % (name, field))
@@ -79,13 +85,21 @@ def load_config(path):
         raise ValueError('scoring and sources must be mappings.')
     for key, value in cfg['scoring'].items():
         if key == 'hype_words':
-            if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
-                raise ValueError('scoring.hype_words must be a string list.')
-        elif not isinstance(value, (int, float)) or not math.isfinite(value):
+            if not isinstance(value, list) or not all(isinstance(v, str) and v.strip() for v in value):
+                raise ValueError('scoring.hype_words must be a list of nonempty strings.')
+        elif isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
             raise ValueError('Scoring weight %s must be numeric.' % key)
     for name, source in cfg['sources'].items():
         if not isinstance(source, dict):
             raise ValueError('Source %s must be a mapping.' % name)
+    for source_name, field in (('arxiv', 'base_url'), ('huggingface_daily', 'url')):
+        raw_url = cfg['sources'].get(source_name, {}).get(field)
+        if raw_url is not None:
+            if not isinstance(raw_url, str) or not raw_url.strip():
+                raise ValueError('sources.%s.%s must be a nonempty HTTP(S) URL.' % (source_name, field))
+            parsed = urllib.parse.urlsplit(raw_url.strip())
+            if parsed.scheme not in ('http', 'https') or not parsed.hostname or parsed.username is not None or parsed.password is not None:
+                raise ValueError('sources.%s.%s must be a valid HTTP(S) URL without credentials.' % (source_name, field))
     categories = cfg['sources'].get('arxiv', {}).get('categories', ['cs.AI'])
     if not isinstance(categories, list) or not categories or not all(isinstance(v, str) and v.strip() for v in categories):
         raise ValueError('sources.arxiv.categories must be a nonempty string list.')
@@ -93,7 +107,7 @@ def load_config(path):
 
 
 def _arxiv_parts(value):
-    """Parse a whole identifier or official abs/pdf URL, never a substring."""
+    """Parse a whole identifier or official abs/pdf/html URL, never a substring."""
     value = str(value or '').strip()
     if value.lower().startswith('arxiv:'):
         value = value[6:]
@@ -105,11 +119,11 @@ def _arxiv_parts(value):
         if (url.scheme not in ('http', 'https') or url.hostname not in ARXIV_HOSTS
                 or url.username is not None or url.password is not None):
             return '', None
-        path = re.fullmatch(r'/(abs|pdf)/(.+)', url.path)
+        path = re.fullmatch(r'/(abs|pdf|html)/(.+?)/?', url.path)
         if not path:
             return '', None
         value = path.group(2)
-        if path.group(1) == 'pdf' and value.endswith('.pdf'):
+        if path.group(1) == 'pdf' and value.lower().endswith('.pdf'):
             value = value[:-4]
     match = ARXIV_PATTERN.fullmatch(value)
     return (match.group(1).lower(), int(match.group(2)) if match.group(2) else None) if match else ('', None)
@@ -159,17 +173,22 @@ def normalize_paper(raw, source=None):
     if not isinstance(raw_authors, list):
         raise ValueError('Paper authors must be a list.')
     for author in raw_authors:
-        if isinstance(author, str):
-            authors.append({'name': author, 'affiliations': []})
-        elif isinstance(author, dict) and author.get('name'):
-            authors.append({'name': str(author['name']), 'affiliations': sorted(_strings(author.get('affiliations', author.get('affiliation'))))})
+        if isinstance(author, str) and author.strip():
+            authors.append({'name': author.strip(), 'affiliations': []})
+        elif isinstance(author, dict) and isinstance(author.get('name'), str) and author['name'].strip():
+            authors.append({'name': author['name'].strip(), 'affiliations': sorted(_strings(author.get('affiliations', author.get('affiliation'))))})
         else:
-            raise ValueError('Each author must have a name.')
+            raise ValueError('Each author must have a nonempty string name.')
     sources = _strings(raw.get('sources', raw.get('source')))
     if source and source not in sources:
         sources.append(source)
+    raw_votes = raw.get('hf_upvotes', raw.get('upvotes', 0))
+    if raw_votes is None:
+        raw_votes = 0
+    if isinstance(raw_votes, bool) or isinstance(raw_votes, float):
+        raise ValueError('HF upvotes must be an integer.')
     try:
-        votes = max(0, int(raw.get('hf_upvotes', raw.get('upvotes', 0)) or 0))
+        votes = max(0, int(raw_votes))
     except (ValueError, TypeError) as exc:
         raise ValueError('HF upvotes must be an integer.') from exc
     return {
@@ -188,7 +207,7 @@ def parse_arxiv_xml(payload):
         raise ValueError('arXiv did not return an Atom feed.')
     ns = ATOM if root.tag == ATOM + 'feed' else ''
     total_node = root.find(OPENSEARCH + 'totalResults')
-    total = int(total_node.text) if total_node is not None and total_node.text else None
+    total = int(total_node.text.strip()) if total_node is not None and total_node.text and total_node.text.strip() else None
     papers = []
     for entry in root.findall(ns + 'entry'):
         def content(name):
@@ -226,7 +245,7 @@ class HttpClient:
                 if delay > 0:
                     time.sleep(delay)
             self.last_request = time.monotonic()
-            request = urllib.request.Request(url, headers={'User-Agent': 'research-radar/1.0 (paper discovery)', 'Accept': 'application/atom+xml, application/json'})
+            request = urllib.request.Request(url, headers={'User-Agent': 'research-radar/%s (paper discovery)' % __version__, 'Accept': 'application/atom+xml, application/json'})
             try:
                 with urllib.request.urlopen(request, timeout=self.timeout) as response:
                     return response.read(), attempt + 1
@@ -314,7 +333,10 @@ def fetch_hf(cfg, start, end, client, max_results):
                     pid = raw.get('id', '')
                     if not isinstance(pid, str) or not pid.strip():
                         raise ValueError('HF paper id must be a nonempty string.')
-                    paper = normalize_paper({'id': pid, 'title': raw.get('title'), 'abstract': raw.get('summary'), 'authors': raw.get('authors', []), 'published': raw.get('publishedAt', ''), 'url': 'https://arxiv.org/abs/' + pid if arxiv_id(pid) else 'https://huggingface.co/papers/' + pid, 'hf_upvotes': raw.get('upvotes', item.get('upvotes', 0)), 'hf_featured_dates': [current.isoformat()]}, 'hf')
+                    pid = pid.strip()
+                    aid, ver = _arxiv_parts(pid)
+                    paper_url = ('https://arxiv.org/abs/' + aid + ('v' + str(ver) if ver else '')) if aid else ('https://huggingface.co/papers/' + urllib.parse.quote(pid, safe=''))
+                    paper = normalize_paper({'id': pid, 'title': raw.get('title'), 'abstract': raw.get('summary'), 'authors': raw.get('authors', []), 'published': raw.get('publishedAt', ''), 'url': paper_url, 'hf_upvotes': raw.get('upvotes', item.get('upvotes', 0)), 'hf_featured_dates': [current.isoformat()]}, 'hf')
                     papers.append(paper)
                 except (ValueError, TypeError, OverflowError) as exc:
                     result['errors'].append('%s: record %d: %s' % (current.isoformat(), index, exc))
@@ -380,15 +402,23 @@ def import_file(path, max_results):
     return papers, result
 
 
-def keyword_match(keyword, text):
+def keyword_match(keyword, text, case_sensitive=False):
     parts = re.split(r'[\s_-]+', keyword.strip())
     pattern = r'(?<!\w)' + r'[\s_-]+'.join(re.escape(p) for p in parts) + r'(?!\w)'
-    return re.search(pattern, text, re.IGNORECASE) is not None
+    flags = 0 if case_sensitive else re.IGNORECASE
+    return re.search(pattern, text, flags) is not None
 
 
 def matching_clusters(paper, clusters):
     text = paper['title'] + ' ' + paper['abstract']
-    return [name for name, definition in clusters.items() if any(keyword_match(k, text) for k in definition.get('include', []) or []) and not any(keyword_match(k, text) for k in definition.get('exclude', []) or [])]
+    matched = []
+    for name, definition in clusters.items():
+        inc = any(keyword_match(k, text) for k in definition.get('include', []) or [])
+        inc_exact = any(keyword_match(k, text, case_sensitive=True) for k in definition.get('include_case_sensitive', []) or [])
+        exc = any(keyword_match(k, text) for k in definition.get('exclude', []) or [])
+        if (inc or inc_exact) and not exc:
+            matched.append(name)
+    return matched
 
 
 def score_paper(paper, weights):
@@ -401,14 +431,14 @@ def score_paper(paper, weights):
         amount = float(weights.get(key, default))
         value += amount
         signals.append('%s (%+g)' % (label, amount))
-    promised = re.search(r'\b(?:will|plan to|intend to)\s+(?:be\s+)?(?:release|released|publish|open.source)\b', lower)
+    promised = re.search(r'\b(?:will|plan to|intend to)\s+(?:be\s+)?(?:release|released|publish|published|open[- ]sourced?)\b', lower)
     available = re.search(r'\bcode\s+(?:is\s+)?(?:publicly\s+)?available\b|github\.com/|huggingface\.co/', lower)
     if promised:
         signals.append('code_release_promised (unverified)')
     elif available and not re.search(r'\bcode\s+(?:is\s+)?not\s+(?:yet\s+)?available\b', lower):
         add('code_available_claim', 'code_released', 3.0)
     benchmarks = ('COCO', 'ImageNet', 'AGIBench', 'BridgeV2', 'LIBERO', 'CALVIN', 'RLBench', 'RoboCasa', 'BEHAVIOR', 'MT-Bench', 'HumanEval', 'SWE-Bench', 'GSM8K', 'MATH', 'ARC-AGI', 'MMLU', 'MMBench', 'VideoMME', 'EgoSchema', 'Open-X-Embodiment', 'DROID', 'TongVerse')
-    found = [b for b in benchmarks if keyword_match(b, text)]
+    found = [b for b in benchmarks if keyword_match(b, text, case_sensitive=(b in CASE_SENSITIVE_BENCHMARKS))]
     if found:
         add('benchmark_mentioned:' + ','.join(found), 'benchmark_named', 1.5)
     baselines = ('LLaVA', 'Qwen', 'DeepSeek', 'LLaMA', 'pi-0', 'OpenVLA', 'RT-2', 'diffusion policy', 'RDT', 'GR00T', 'RoboVLM')
@@ -422,15 +452,21 @@ def score_paper(paper, weights):
     numbers = bool(re.search(r'(?<!\w)\d+(?:[.,]\d+)?(?:\s*[%×x])?(?!\w)', paper['abstract']))
     if not numbers:
         add('no_numeric_evidence_in_abstract', 'no_numbers', -1.5)
-        if re.search(r'state[- ]of[- ]the[- ]art', lower):
+        if re.search(r'(?:\bstate[- ]of[- ]the[- ]art\b|\bsota\b)', lower):
             add('sota_claim_without_numbers', 'vague_sota_claim', -2.0)
+    seen_hype = set()
     for word in weights.get('hype_words', []):
-        if keyword_match(word, text):
+        key = word.strip().casefold()
+        if key not in seen_hype and keyword_match(word, text):
+            seen_hype.add(key)
             add('hype_term:' + word, 'hype_penalty', -1.0)
     buzz = ('novel', 'innovative', 'comprehensive', 'extensive', 'remarkable', 'promising', 'powerful', 'effective', 'robust')
-    count = sum(len(re.findall(r'\b' + word + r'\b', lower)) for word in buzz)
-    if count / max(1, len(paper['abstract'].split())) > 0.05:
-        add('high_buzzword_density', 'buzzword_density', -2.0)
+    abstract_words = paper['abstract'].split()
+    if abstract_words:
+        abstract_lower = paper['abstract'].lower()
+        count = sum(len(re.findall(r'\b' + word + r'\b', abstract_lower)) for word in buzz)
+        if count / len(abstract_words) > 0.05:
+            add('high_buzzword_density', 'buzzword_density', -2.0)
     if paper['hf_upvotes'] >= 50:
         add('hf_upvotes_ge_50', 'hf_popular', 3.0)
     elif paper['hf_upvotes'] >= 10:
@@ -504,7 +540,7 @@ def prepare_papers(raw_papers, previous, cfg):
 
 
 def _md(value):
-    return str(value).replace('\\', '\\\\').replace('[', '\\[').replace(']', '\\]').replace('<', '&lt;').replace('>', '&gt;')
+    return str(value).replace('\\', '\\\\').replace('\r', ' ').replace('\n', ' ').replace('[', '\\[').replace(']', '\\]').replace('<', '&lt;').replace('>', '&gt;')
 
 
 def render_report(run, papers, cfg, cluster, top, show_all):
@@ -540,13 +576,13 @@ def _nonnegative(value):
     return number
 
 
-def build_parser():
-    parser = argparse.ArgumentParser(description=__doc__)
+def build_parser(prog=None):
+    parser = argparse.ArgumentParser(prog=prog, description=__doc__)
     parser.add_argument('--date', type=dt.date.fromisoformat, default=utc_yesterday(), help='UTC end date; default yesterday')
     parser.add_argument('--days', type=_positive, default=1)
     parser.add_argument('--source', choices=('arxiv', 'hf', 'both', 'file'), default='both')
     parser.add_argument('--input', type=Path, help='structured paper JSON for --source file')
-    parser.add_argument('--cluster', default='all', help='Markdown view only; machine data always retains all papers')
+    parser.add_argument('--cluster', default='all', help='Markdown view only (cluster name, Unclassified, or all); machine data always retains all papers')
     parser.add_argument('--top', type=_positive, default=15, help='maximum papers per Markdown cluster')
     parser.add_argument('--all', action='store_true', help='show all papers in the Markdown view')
     parser.add_argument('--out', type=Path, help='custom Markdown path')
@@ -558,8 +594,8 @@ def build_parser():
     return parser
 
 
-def main(argv=None):
-    parser = build_parser()
+def main(argv=None, prog=None):
+    parser = build_parser(prog=prog)
     try:
         args = parser.parse_args(argv)
         if args.source == 'file' and args.input is None:
@@ -567,7 +603,7 @@ def main(argv=None):
         if args.source != 'file' and args.input is not None:
             parser.error('--input is only valid with --source file')
         cfg = load_config(args.config)
-        if args.cluster != 'all' and args.cluster not in cfg['clusters']:
+        if args.cluster not in ('all', 'Unclassified') and args.cluster not in cfg['clusters']:
             parser.error('unknown cluster: ' + args.cluster)
     except SystemExit as exc:
         code = int(exc.code or 0)
